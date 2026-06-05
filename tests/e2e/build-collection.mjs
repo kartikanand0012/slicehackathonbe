@@ -517,6 +517,31 @@ appendTest(findRequest("Disputes (Fairness Engine)", "List disputes on an expens
   "pm.test('items is an array', () => pm.expect(pm.response.json().items).to.be.an('array'));",
 ]);
 
+// ── Invites (PR 5 B)
+appendTest(findRequest("Invites (PR 5 B — WhatsApp/SMS group invites)", "Mint invite for an existing contact"), [
+  "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
+  "pm.test('returns invite + shareUrl', () => {",
+  "  const b = pm.response.json();",
+  "  pm.expect(b.invite).to.have.property('token').that.is.a('string');",
+  "  pm.expect(b.shareUrl).to.match(/^https?:\\/\\/[^\\s]+\\/invite\\/[^\\s]+$/);",
+  "});",
+]);
+appendTest(findRequest("Invites (PR 5 B — WhatsApp/SMS group invites)", "Public read by token (no auth — invite landing)"), [
+  "pm.test('200 OK', () => pm.expect(pm.response.code).to.eql(200));",
+  "pm.test('status is PENDING', () => pm.expect(pm.response.json().invite.status).to.eql('PENDING'));",
+  "pm.test('group preview is present', () => pm.expect(pm.response.json().invite.group).to.have.property('name'));",
+]);
+
+// PR 4.5: streamed image route
+appendTest(findRequest("Receipts (async OCR)", "Stream receipt image (LOCAL backend only — PR 4.5)"), [
+  "// 200 if LOCAL backend; some envs return 404 if S3 backend is picked (which",
+  "// is correct — imageUrl points to S3 directly in that case). Accept both.",
+  "pm.test('200 or 404', () => pm.expect([200, 404]).to.include(pm.response.code));",
+  "if (pm.response.code === 200) {",
+  "  pm.test('image content-type', () => pm.expect(pm.response.headers.get('Content-Type') || '').to.match(/^image\\//));",
+  "}",
+]);
+
 fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.writeFileSync(OUT, JSON.stringify(collection, null, 2));
 process.stdout.write(`Wrote ${path.relative(ROOT, OUT)}\n`);

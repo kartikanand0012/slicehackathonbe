@@ -2,12 +2,29 @@ import { z } from "zod";
 
 const Cuid = z.string().cuid();
 
+// A member can be a platform user (`userId`) or a non-Slice contact
+// (`contactId`). When the FE adds someone from the address book who hasn't
+// signed up yet, it passes the contactId; we register them as a
+// contact-kind member so the group has a stable identity to attach
+// invites to.
+const MemberRefSchema = z
+  .object({
+    userId: Cuid.optional(),
+    contactId: Cuid.optional(),
+  })
+  .strict()
+  .refine((m) => Boolean(m.userId) !== Boolean(m.contactId), {
+    message: "Each member must set exactly one of userId or contactId",
+  });
+
 export const CreateGroupBody = z.object({
   name: z.string().min(1).max(80).trim(),
   emoji: z.string().min(1).max(8).optional(),
   description: z.string().max(500).optional(),
   simplifyDebts: z.boolean().optional(),
+  // Legacy shape — still supported. Treated as `members: [{ userId }]`.
   memberIds: z.array(Cuid).max(50).optional(),
+  members: z.array(MemberRefSchema).max(50).optional(),
 });
 export type CreateGroupBody = z.infer<typeof CreateGroupBody>;
 

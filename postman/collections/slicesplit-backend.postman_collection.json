@@ -143,6 +143,16 @@
           }
         },
         {
+          "name": "Create group with mixed members (PR 5 B — userId + contactId)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Goa Trip mixed\",\n  \"emoji\": \"🏖️\",\n  \"members\": [\n    { \"userId\": \"{{user_b_id}}\" }\n  ]\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/groups", "host": ["{{base_url}}{{api_prefix}}"], "path": ["groups"] },
+            "description": "Each member ref carries exactly one of `userId` (platform user — joins as a real user-kind GroupMember) or `contactId` (your address book — joins as a contact-kind GroupMember placeholder until they redeem an invite). The two-shape body lives alongside the legacy `memberIds` array which still works.\n\n(For Newman: this request uses userId-only since contact_id isn't populated until the Contacts folder runs. The Invites folder later exercises the contact-kind path end-to-end via its own bootstrapped contact.)"
+          }
+        },
+        {
           "name": "Get group by id",
           "request": { "method": "GET", "url": { "raw": "{{base_url}}{{api_prefix}}/groups/{{group_id}}", "host": ["{{base_url}}{{api_prefix}}"], "path": ["groups", "{{group_id}}"] } }
         },
@@ -367,6 +377,14 @@
           "request": { "method": "GET", "url": { "raw": "{{base_url}}{{api_prefix}}/receipts/{{receipt_id}}", "host": ["{{base_url}}{{api_prefix}}"], "path": ["receipts", "{{receipt_id}}"] } }
         },
         {
+          "name": "Stream receipt image (LOCAL backend only — PR 4.5)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}{{api_prefix}}/receipts/{{receipt_id}}/image", "host": ["{{base_url}}{{api_prefix}}"], "path": ["receipts", "{{receipt_id}}", "image"] },
+            "description": "Returns the raw image bytes. Only used when `storageBackend` on the receipt is `LOCAL` — S3-backed receipts get a presigned URL pointing directly at S3 in the `imageUrl` field of the receipt response, so the FE never hits this endpoint for those."
+          }
+        },
+        {
           "name": "Convert receipt to expense (EQUAL)",
           "request": {
             "method": "POST",
@@ -526,6 +544,69 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": { "mode": "raw", "raw": "{\n  \"resolution\": \"After checking the bill, the original split was correct.\"\n}" },
             "url": { "raw": "{{base_url}}{{api_prefix}}/disputes/{{dispute_open_id}}/reject", "host": ["{{base_url}}{{api_prefix}}"], "path": ["disputes", "{{dispute_open_id}}", "reject"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Invites (PR 5 B — WhatsApp/SMS group invites)",
+      "description": "Mint short-lived tokens the FE drops into WhatsApp / SMS deep links so a non-Slice contact can land on the redeem page and join the group. Two-faced router: authenticated mutations under /invites, public read under /i/:token.\n\nState machine: PENDING → USED (via /redeem) or EXPIRED (via expiresAt).\n\nRate limit on POST /invites: 10 per 5 min per IP.\n\nThis folder bootstraps its own contact so it can run before the Contacts folder.",
+      "item": [
+        {
+          "name": "Setup: create a Charlie contact for invite flow",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "if (pm.response.code === 201) {",
+            "  pm.environment.set('invite_contact_id', pm.response.json().contact.id);",
+            "}"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"displayName\": \"Charlie (invite test)\",\n  \"phone\": \"+919812345678\"\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/contacts", "host": ["{{base_url}}{{api_prefix}}"], "path": ["contacts"] }
+          }
+        },
+        {
+          "name": "Mint invite for an existing contact",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "if (pm.response.code === 201) {",
+            "  const b = pm.response.json();",
+            "  pm.environment.set('invite_token', b.invite.token);",
+            "  pm.environment.set('invite_share_url', b.shareUrl);",
+            "  pm.test('shareUrl returned', () => pm.expect(b.shareUrl).to.match(/^https?:\\/\\//));",
+            "}"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"groupId\": \"{{group_id}}\",\n  \"contactId\": \"{{invite_contact_id}}\",\n  \"expiresInDays\": 7\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/invites", "host": ["{{base_url}}{{api_prefix}}"], "path": ["invites"] }
+          }
+        },
+        {
+          "name": "Mint invite by phone (no Contact pre-existing)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"groupId\": \"{{group_id}}\",\n  \"phone\": \"+919812345678\",\n  \"expiresInDays\": 7\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/invites", "host": ["{{base_url}}{{api_prefix}}"], "path": ["invites"] }
+          }
+        },
+        {
+          "name": "Public read by token (no auth — invite landing)",
+          "request": {
+            "method": "GET",
+            "auth": { "type": "noauth" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/i/{{invite_token}}", "host": ["{{base_url}}{{api_prefix}}"], "path": ["i", "{{invite_token}}"] },
+            "description": "Public endpoint the invite-landing page calls to render group name + expiry + status. No auth, returns nothing PII-y."
+          }
+        },
+        {
+          "name": "Redeem invite (auth)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{base_url}}{{api_prefix}}/invites/{{invite_token}}/redeem", "host": ["{{base_url}}{{api_prefix}}"], "path": ["invites", "{{invite_token}}", "redeem"] },
+            "description": "Auth required. Marks invite used, links the underlying Contact to the redeemer's User account (if any), and flips the GroupMember row from contact-kind to user-kind in one transaction. Second call returns 400 INVITE_USED."
           }
         }
       ]

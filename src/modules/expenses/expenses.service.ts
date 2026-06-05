@@ -43,10 +43,13 @@ async function requireGroupMember(
 
 async function activeMemberIds(groupId: string): Promise<Set<string>> {
   const rows = await prisma.groupMember.findMany({
-    where: { groupId, leftAt: null },
+    // Only platform-user members are eligible for expense shares — non-Slice
+    // contact members (userId: null) can sit in a group but can't carry an
+    // ExpenseShare until they redeem an invite and become a real User.
+    where: { groupId, leftAt: null, userId: { not: null } },
     select: { userId: true },
   });
-  return new Set(rows.map((r) => r.userId));
+  return new Set(rows.flatMap((r) => (r.userId ? [r.userId] : [])));
 }
 
 function toSplitInput(

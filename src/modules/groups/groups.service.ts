@@ -1,5 +1,5 @@
 import { prisma } from "@/db/prisma";
-import { ForbiddenError, NotFoundError } from "@/lib/errors";
+import { BadRequestError, ForbiddenError, NotFoundError } from "@/lib/errors";
 import type {
   AddMemberBody,
   CreateGroupBody,
@@ -22,6 +22,9 @@ const GROUP_PUBLIC_SELECT = {
       role: true,
       joinedAt: true,
       user: { select: { id: true, name: true, email: true, avatarUrl: true } },
+      contact: {
+        select: { id: true, displayName: true, phone: true, email: true, linkedUserId: true },
+      },
     },
   },
 } as const;
@@ -75,30 +78,61 @@ export async function listGroups(userId: string, query: ListGroupsQuery) {
 }
 
 export async function createGroup(userId: string, input: CreateGroupBody) {
-  const memberIds = Array.from(new Set([userId, ...(input.memberIds ?? [])]));
+  // Normalise both input shapes (legacy `memberIds` and new `members`) to
+  // a single de-duped list of refs. The creator is always added as OWNER.
+  const refs: { userId?: string; contactId?: string }[] = [
+    { userId },
+    ...(input.memberIds ?? []).map((id) => ({ userId: id })),
+    ...(input.members ?? []),
+  ];
 
-  // Validate that every supplied memberId is a real user — fail loudly rather
-  // than silently dropping bad ids.
-  if (memberIds.length > 1) {
-    const found = await prisma.user.count({ where: { id: { in: memberIds } } });
-    if (found !== memberIds.length) {
-      throw new NotFoundError("One or more memberIds reference unknown users");
+  const userIds = new Set<string>();
+  const contactIds = new Set<string>();
+  for (const r of refs) {
+    if (r.userId) userIds.add(r.userId);
+    else if (r.contactId) contactIds.add(r.contactId);
+  }
+
+  // Validate every referenced user + contact exists. Contacts must also
+  // belong to the caller — you can't add someone else's address-book
+  // entry to a group.
+  if (userIds.size > 0) {
+    const found = await prisma.user.count({
+      where: { id: { in: [...userIds] } },
+    });
+    if (found !== userIds.size) {
+      throw new NotFoundError("One or more userIds reference unknown users");
+    }
+  }
+  if (contactIds.size > 0) {
+    const owned = await prisma.contact.count({
+      where: { id: { in: [...contactIds] }, ownerId: userId },
+    });
+    if (owned !== contactIds.size) {
+      throw new BadRequestError(
+        "One or more contactIds reference contacts that don't belong to you",
+      );
     }
   }
 
   const group = await prisma.$transaction(async (tx) => {
+    const memberCreates = [
+      ...[...userIds].map((uid) => ({
+        userId: uid,
+        role: (uid === userId ? "OWNER" : "MEMBER") as "OWNER" | "MEMBER",
+      })),
+      ...[...contactIds].map((cid) => ({
+        contactId: cid,
+        role: "MEMBER" as const,
+      })),
+    ];
     const g = await tx.group.create({
       data: {
         name: input.name,
         emoji: input.emoji,
         description: input.description,
         simplifyDebts: input.simplifyDebts ?? true,
-        members: {
-          create: memberIds.map((mid) => ({
-            userId: mid,
-            role: mid === userId ? "OWNER" : "MEMBER",
-          })),
-        },
+        members: { create: memberCreates },
       },
       select: GROUP_PUBLIC_SELECT,
     });

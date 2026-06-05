@@ -13,6 +13,10 @@ import {
   ownedGuestSplitsRouter,
   publicGuestSplitsRouter,
 } from "@/modules/guest/guest.routes";
+import {
+  invitesRouter,
+  publicInvitesRouter,
+} from "@/modules/invites/invites.routes";
 import { healthRouter } from "@/modules/health/health.routes";
 import { meRouter } from "@/modules/me/me.routes";
 import { receiptsRouter } from "@/modules/receipts/receipts.routes";
@@ -38,3 +42,6 @@ apiRouter.use("/commands", commandsRouter);
 
 apiRouter.use("/guest-splits", ownedGuestSplitsRouter);
 apiRouter.use("/g", publicGuestSplitsRouter); // short prefix for share URLs
+
+apiRouter.use("/invites", invitesRouter);
+apiRouter.use("/i", publicInvitesRouter); // public read by token

@@ -80,6 +80,11 @@ model Contact {
   owner      User  @relation("ContactOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   linkedUser User? @relation("ContactLinkedUser", fields: [linkedUserId], references: [id], onDelete: SetNull)
 
+  // PR 5 B-1: a contact can stand in for a non-Slice person inside groups
+  // and invites, until they sign up and link.
+  groupMemberships GroupMember[] @relation("GroupMemberContact")
+  groupInvites     GroupInvite[] @relation("GroupInviteContact")
+
   @@unique([ownerId, phone])
   @@unique([ownerId, email])
   @@index([ownerId])
@@ -113,18 +118,30 @@ enum GroupRole {
   MEMBER
 }
 
+// A group member is either a real platform User (`userId` set) or a
+// non-Slice Contact (`contactId` set). Exactly one MUST be non-null —
+// enforced at the service layer because Prisma can't express CHECK
+// constraints. When an invited contact eventually signs up + redeems
+// their invite, the corresponding GroupMember row is mutated:
+// `contactId` cleared, `userId` set.
 model GroupMember {
-  id       String    @id @default(cuid())
-  userId   String
-  groupId  String
-  role     GroupRole @default(MEMBER)
-  joinedAt DateTime  @default(now())
-  leftAt   DateTime?
+  id        String    @id @default(cuid())
+  userId    String? // platform-user membership (nullable since PR 5 B-1)
+  contactId String? // address-book membership (the non-Slice path)
+  groupId   String
+  role      GroupRole @default(MEMBER)
+  joinedAt  DateTime  @default(now())
+  leftAt    DateTime?
 
-  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user    User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contact Contact? @relation("GroupMemberContact", fields: [contactId], references: [id], onDelete: Cascade)
+  group   Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, groupId])
+  // Two narrower uniques replace the old (userId, groupId) unique. They
+  // each tolerate NULL on the non-matching side so the two member kinds
+  // never collide.
+  @@unique([userId, groupId], map: "GroupMember_userId_groupId_key")
+  @@unique([contactId, groupId], map: "GroupMember_contactId_groupId_key")
   @@index([groupId])
 }
 
@@ -136,11 +153,19 @@ model GroupInvite {
   expiresAt DateTime
   usedAt    DateTime?
   usedById  String?
+  // PR 5 B-1: WhatsApp/SMS invites carry a phone + the originating
+  // contact so the redeem flow can backfill `Contact.linkedUserId`
+  // and mutate the GroupMember row from contact-kind to user-kind.
+  phone     String?
+  contactId String?
   createdAt DateTime  @default(now())
 
-  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  group   Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  contact Contact? @relation("GroupInviteContact", fields: [contactId], references: [id], onDelete: SetNull)
 
   @@index([groupId])
+  @@index([phone])
+  @@index([contactId])
 }
 
 // ─── EXPENSES ──────────────────────────────────────────────

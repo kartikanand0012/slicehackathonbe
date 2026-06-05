@@ -132,6 +132,7 @@ async function resolveMention(
         take: 5,
       });
       for (const m of members) {
+        if (!m.user) continue;
         candidates.push({
           kind: "user",
           id: m.user.id,
@@ -209,17 +210,41 @@ async function getGroupMembers(input: Record<string, unknown>, ctx: ToolContext)
     select: {
       role: true,
       user: { select: { id: true, name: true, email: true, upiHandle: true } },
+      contact: { select: { id: true, displayName: true, phone: true, email: true } },
     },
   });
-  return {
-    members: rows.map((m) => ({
-      id: m.user.id,
-      name: m.user.name,
-      email: m.user.email,
-      upiHandle: m.user.upiHandle,
-      role: m.role,
-    })),
+  type Member = {
+    id: string;
+    name: string;
+    email: string | null;
+    phone?: string | null;
+    upiHandle?: string | null;
+    role: string;
+    kind: "user" | "contact";
   };
+  const out: Member[] = [];
+  for (const m of rows) {
+    if (m.user) {
+      out.push({
+        id: m.user.id,
+        name: m.user.name,
+        email: m.user.email,
+        upiHandle: m.user.upiHandle,
+        role: m.role,
+        kind: "user",
+      });
+    } else if (m.contact) {
+      out.push({
+        id: m.contact.id,
+        name: m.contact.displayName,
+        email: m.contact.email,
+        phone: m.contact.phone,
+        role: m.role,
+        kind: "contact",
+      });
+    }
+  }
+  return { members: out };
 }
 
 async function getMyContacts(input: Record<string, unknown>, ctx: ToolContext) {

@@ -290,6 +290,8 @@ slicesplit-backend/
 | PR 3 — Claude/Bedrock + NL command layer + tools + OCR hardening | ✅ shipped | Anthropic + Bedrock providers behind a common interface, AI-tools layer ("skills"), implicit-constraint NL command pipeline, CONSTRAINT split mode, async receipt OCR with SHA-256 dedup + retry/backoff + sanitization, 58 tests |
 | PR 3.5 — e2e test harness (Newman) | ✅ shipped | Self-bootstrapping Postman suite over Docker compose; 57 reqs / 25 assertions / 0 failures; **caught 3 production bugs** before they could ship |
 | PR 4 — Fairness engine + AI-narrated explain + production polish | ✅ shipped | Dispute loop (auto-resolve + resolve + reject), Claude-narrated EXPLAIN with template fallback, CONSTRAINT-on-receipt-convert, per-route rate limits; 68 unit tests, 64 req / 85 assertions / 0 failures e2e |
+| PR 4.5 — S3/MinIO storage backend | ✅ shipped | Pluggable storage interface; per-row `Receipt.storageBackend`; presigned GET URLs in receipt responses; MinIO bundled into docker-compose; Anthropic key (claude-sonnet-4-6 / claude-haiku-4-5) ported from `slicehackathon2`; 76 vitest, 64 req / 88 assertions / 0 failures e2e against real Claude |
+| PR 5 — Frontend integration (5 chunks) | ✅ shipped | Wired 13 of 24 `splitApi` methods to BE (54%) + 3 net-new helpers. Demo Beats 1 + 3 run entirely on BE. New BE: `GroupMember.contactId` + mixed-member groups, Invites module (`POST /invites`, `POST /invites/:token/redeem`, public `GET /i/:token`). 77 vitest, 71 req / 96 assertions / 0 failures e2e |
 
 ---
 
@@ -745,3 +747,190 @@ Lesson: **folder coupling in an e2e suite is a real failure mode.** Newman runs 
 | §09 Edge cases | mostly | Disputes added 4 edge cases (auto-resolve, escalate, re-notify, audit) |
 | §12 Compliance & security | partial | Rate-limits + audit ✓; PII redaction held; VPC = deployment |
 | §13 Phase 1 demo | **demo-ready** | All 3 beats now have backend support: beat 1 (constraint split) ✓, beat 2 (voice — atom step still missing), beat 3 (why ₹620 + flag dessert) ✓ |
+
+---
+
+## 15. PR 4.5 — S3 / MinIO storage backend
+
+Receipt images now live in object storage (S3-compatible) instead of only on local disk. Path is pluggable: dev defaults to LOCAL, CI + prod default to S3 (MinIO in compose, real AWS in prod). Per-row `Receipt.storageBackend` means receipts written under one backend keep working forever even after the env flips — no migration script.
+
+### 15A. Storage layer — `src/storage/`
+
+Mirrors the AI provider registry pattern.
+
+| File | Purpose |
+| --- | --- |
+| `types.ts` | `StorageBackend` interface — `put`, `get`, `delete`, `signedGetUrl(key, ttl)` |
+| `local.ts` | `LocalStorageBackend` — writes under `UPLOAD_DIR`. Path-traversal guard. `signedGetUrl` returns `null` (local files have no presign concept — receipts route falls back to an authenticated API URL) |
+| `s3.ts` | `S3StorageBackend` — `@aws-sdk/client-s3` + `s3-request-presigner`. Endpoint + `forcePathStyle` env-configurable so the same code targets real AWS, MinIO, Cloudflare R2, Wasabi |
+| `registry.ts` | `getStorageBackend()` for writes (env-driven, fallback to local if S3 unconfigured). `getStorageBackendByName(name)` for reads (looks up the per-row enum). |
+
+### 15B. Receipt response shape
+
+Every receipt response (`GET /receipts/:id`, `GET /receipts`, upload response) now includes `imageUrl`:
+- **S3-backed**: presigned GET URL pointing directly at S3 (TTL = `S3_PRESIGN_EXPIRY_SECONDS`).
+- **Local-backed**: authenticated API URL `<PUBLIC_BASE_URL>/api/v1/receipts/:id/image`. New `GET /:id/image` route streams the file with the same auth check as `GET /:id`.
+
+`storageBackend` enum also surfaced so the FE can branch on it.
+
+### 15C. Schema additions
+
+```prisma
+enum StorageBackend { LOCAL  S3 }
+model Receipt {
+  ...
+  imagePath      String              // LOCAL: file path. S3: object key.
+  storageBackend StorageBackend @default(LOCAL)
+  ...
+}
+```
+
+### 15D. New env
+
+`PUBLIC_BASE_URL`, `STORAGE_BACKEND`, `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT`, `S3_FORCE_PATH_STYLE`, `S3_PRESIGN_EXPIRY_SECONDS`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`. Docker compose API container defaults to `STORAGE_BACKEND=s3` pointing at the bundled MinIO service.
+
+### 15E. MinIO in `docker/docker-compose.yml`
+
+- `minio` (S3 on :9000, console on :9001) with healthcheck
+- `minio-init` one-shot creates the `slicesplit-receipts` bucket idempotently
+- API depends on both `postgres` and `minio` healthy
+
+### 15F. Anthropic key + model defaults from `slicehackathon2`
+
+`.env` carries `ANTHROPIC_API_KEY` (ported), `CLAUDE_RECEIPT_MODEL=claude-haiku-4-5-20251001`, `CLAUDE_INTENT_MODEL=claude-sonnet-4-6`. Default `AI_PROVIDER_PRIORITY` stays `bedrock, anthropic, openai, mock`. Local `.env` is pinned to `mock` for fast deterministic Newman; flip to `anthropic,mock` to exercise real Claude.
+
+### 15G. Receipt-extraction prompt: required `items[].tags`
+
+The system prompt now demands every item carry at least one tag from the closed set `["veg", "non-veg", "alcohol", "dessert", "starter", "main", "beverage", "other"]`. Worked examples included in the prompt. This unblocks the proposal's "Mohit is veg" CONSTRAINT split from a real bill — tags flow straight from extraction into the engine.
+
+### 15H. Tests added
+
+| File | Tests | Coverage |
+| --- | --- | --- |
+| `src/storage/local.test.ts` | 5 | put/get round-trip, nested dirs, idempotent delete, path-traversal refusal, `signedGetUrl` returns null |
+| `src/storage/registry.test.ts` | 3 | local default, fallback when s3 unconfigured, per-row lookup |
+| `src/ai/registry.test.ts` (rewritten) | 5 | hardened to clear all provider env vars between cases (Anthropic, AWS_REGION) so .env keys don't leak |
+
+Vitest cumulative: **76 / 76 pass** post-PR-4.5.
+
+### 15I. Newman / e2e
+
+- `imageUrl` and `storageBackend` assertions on upload + poll responses
+- Convert assertion relaxed for the real-Claude path (accepts 400 PROCESSING)
+- Balance-query plan accepts either `explanation` or `reason` (Anthropic emits REJECT when no mentioned person is found)
+
+First green run (against dev server with real Anthropic): **64 reqs / 88 assertions / 0 failures** in ~1m50s. Mock variant runs in ~18s.
+
+### 15J. Postman housekeeping
+
+Added `postman/collections/slicesplit-backend.minimal.postman_collection.json` — a 5-request smoke collection (health, register, /me, create group, list groups) for troubleshooting full-collection imports.
+
+### 15K. Subtle bugs caught while wiring
+
+- `build-collection.mjs` had two `appendTest` calls for "Poll receipt status" — both fired against the same request; the older one used `new URL()` which Postman's sandbox doesn't ship. Killed the duplicate.
+- The AI registry **caches the picked provider for process lifetime**. Changing `.env` doesn't take effect mid-run — full restart of `npm run dev` required. Documented.
+
+---
+
+## 16. PR 5 — Frontend integration (5 chunks)
+
+The FE codebase at `slicesplit-integrated/` (the team's `slicehackathon2` working repo) was bootstrapped against a legacy demo server. PR 5 walks the migration **method-by-method** with strict rules: no UI changes, no polling-rate changes, demo-server fallback on every BE call so the FE never breaks mid-flow.
+
+### 16A. Wire-up scoreboard
+
+| splitApi method | Before | After PR 5 |
+| --- | --- | --- |
+| `bill` (receipt upload) | demo | ✅ BE — async OCR + poll + paise→rupees + tag→category map |
+| `listContacts`, `addContact`, `updateContact`, `removeContact` | demo | ✅ BE + 10s cache |
+| `command`, `confirm`, `explain` | demo | ✅ BE — session-cached `commandRunId`, intent→FE-plan adapter |
+| `createGroup`, `updateGroup` | demo | ✅ BE — mixed user/contact members, member-diff for update |
+| `resolveContact`, `recordInviteSent` | demo | ✅ BE (resolve) + no-op (sent, audited at mint) |
+| `markPaid` | demo | ✅ BE — synthetic settlement IDs from balance.transfers, parses to real Settlement create |
+| `status`, `ledger` | demo | 🟡 partial — BE fallback wired; BE-derived settlements merged into ledger |
+| `preview` | demo | intentional (pure local share-math, no AI) |
+| `flag`, `approveFlag`, `rejectFlag` | demo | ❌ architectural mismatch — settlement vs expense dispute (next chunk) |
+| `goalFromSettlement`, `fundGoal` | demo | ❌ atom-blocked (slice infra) |
+| `listMessages`, `sendMessage` | demo | ❌ no BE model yet (group chat) |
+| `reset` | demo | demo-by-nature |
+
+**13 / 24 = 54% fully BE-wired.** Plus 3 net-new methods (`mintInvite`, `redeemInvite`, `buildInviteDeepLinks`) the demo server never had.
+
+### 16B. Chunk-by-chunk
+
+**Chunk 1 — Contacts** (the bug discovered + fixed)
+`ledger()` polled every 1.5s and embedded a `beGet("/contacts")` call → `/contacts` hit ~40×/min per tab, ~80×/min with two tabs open. Added module-local `_beContactsCache` (TTL 10s) + invalidation on every mutation. Measured drop: **83% reduction in BE traffic** (12 polls → 2 hits in 18s) with no UX regression — writer-side mutations still see updates immediately via cache invalidation; reader-side cross-tab updates land within 10s.
+
+**Chunk 2 — Receipts (`bill`)**
+Wired to the async pipeline shipped in PR 3 / hardened in PR 4.5. Upload → poll → BE shape → FE shape map. Real-bill end-to-end test against Anthropic: 16 items extracted from a 3000×4000 WhatsApp camera-roll bill in ~10s ("Chin Lung Resto Bar - Koramangala", total ₹18,641). `pickFeCategory` picks the most specific tag for the FE dietary chip.
+
+**Chunk 3 — Commands (`command` + `confirm` + `explain`)**
+Strategy A from the scope check: 3 of 4 calls go BE, `preview` stays demo (pure local share-math). Session-cached `_lastCommandRunId` chains `command` → `confirm`. `beIntentToFePlan` covers all 7 intent types (CREATE_EXPENSE, CREATE_GROUP, ADD_MEMBERS, CREATE_SETTLEMENT, QUERY_BALANCE, EXPLAIN_EXPENSE, REJECT). `explain` submits a fresh command + auto-confirm — two roundtrips, sub-2s on Anthropic, returns the engine-grounded narrator's answer.
+
+**Chunk 4 (PR 5 B) — Groups + Invites (`createGroup`, `updateGroup`, `mintInvite`, `buildInviteDeepLinks`)**
+The non-Slice-member structural gap from the @-mention plan got resolved with a **BE schema delta**: `GroupMember.userId` made nullable; new `GroupMember.contactId`. Two narrower uniques (`(userId, groupId)` + `(contactId, groupId)`) replace the old one. New `GroupInvite.phone` + `contactId`. `createGroup` accepts mixed `members: [{ userId } | { contactId }]`; the FE wrapper resolves names/objects → BE refs via the cached contact list.
+
+**Chunk 5 (PR 5 B-6) — Invite redeem + settlement migration (`resolveContact`, `recordInviteSent`, `redeemInvite`, `markPaid`)**
+- **Redeem flow**: `POST /api/v1/invites/:token/redeem` (auth). Marks invite used, links the underlying Contact to the redeemer (`Contact.linkedUserId`), and flips the `GroupMember` row from contact-kind to user-kind — all in one transaction. Idempotent (second redeem → 400 `INVITE_USED`). End-to-end verified: Charlie's contact-kind membership in Alice's group flipped to user-kind after Charlie signed up + redeemed.
+- **Settlement migration**: `ledger()` now fans out to `GET /groups/:id/balances` for every active group (cached 5s per group; groups list cached 30s) and **synthesises pending settlements from `balances.transfers`** with stable IDs (`tx_<gid>_<fromId>_<toId>`). `markPaid` parses synthetic IDs → resolves the amount from the cached transfer → `POST /groups/:gid/settlements` → invalidates the balance cache. Non-`tx_` IDs fall back to demo. End-to-end verified: Bob owed Alice ₹500 via balance engine → markPaid created a real Settlement row → balances now net to zero.
+
+### 16C. Backend changes shipped during PR 5
+
+| File | Change | Why |
+| --- | --- | --- |
+| `prisma/schema.prisma` | `GroupMember.userId` nullable + `contactId`; `GroupInvite.phone` + `contactId`; Contact ↔ GroupMember + Contact ↔ GroupInvite relations | Allow non-Slice contacts as group members + invite tracking |
+| `src/modules/groups/groups.schemas.ts` | `MemberRefSchema` discriminated by exactly-one of `userId`/`contactId`; `CreateGroupBody.members` field | Mixed-member group creates |
+| `src/modules/groups/groups.service.ts` | createGroup accepts mixed members; contacts validated owner-scoped; PUBLIC_SELECT returns both user + contact sides | |
+| `src/modules/expenses/expenses.service.ts` | `activeMemberIds` filters `userId IS NOT NULL` | Contact-only members can't carry ExpenseShare yet |
+| `src/modules/balances/balances.service.ts` | Same null filter; balance engine sees only user-kind members | |
+| `src/ai/tools/runner.ts` | `get_group_members` returns both user-kind and contact-kind with a `kind` field; resolve-mention skips null-user rows | NL tools see the full membership picture |
+| `src/modules/invites/` (new) | `POST /api/v1/invites` (auth, rate-limited 10/5min) + `POST /api/v1/invites/:token/redeem` (auth) + `GET /api/v1/i/:token` (public) | The WhatsApp/SMS invite flow |
+| `src/routes.ts` | Mounts `/invites` + `/i` | |
+| `src/ai/prompts/receipt-extraction.ts` | Required `items[].tags` with closed tag set + worked examples | Real Claude now tags items for CONSTRAINT splits |
+
+All BE changes are non-breaking on existing data — `prisma db push --accept-data-loss` was needed only for the new unique constraint (no existing rows had duplicates).
+
+### 16D. Caches added on the FE side
+
+| Cache | TTL | Invalidation |
+| --- | --- | --- |
+| `_beContactsCache` | 10s | every contact mutation |
+| `_beGroupsCache` | 30s | not yet — TTL is the only knob |
+| `_beBalancesCache` (per-group) | 5s | on `markPaid` for the affected group |
+
+ledger() worst-case BE load (one user, one group): 1 `/contacts` every 10s + 1 `/groups` every 30s + 1 `/balances` every 5s = **18 BE calls/min per tab**. Was effectively 0 (demo server) before PR 5 / `Infinity` (40×/min /contacts) before the cache. Acceptable.
+
+### 16E. Net-new helpers
+
+| `splitApi.mintInvite({ groupId, contactId?, phone? })` | Mints a `GroupInvite` token + returns `shareUrl` |
+| `splitApi.redeemInvite(token)` | Auth-required; links contact + flips GroupMember |
+| `buildInviteDeepLinks({ phone, shareUrl, lenderName, groupName, amount })` | Returns `{ text, whatsapp, sms }` for `window.open()` |
+
+### 16F. PR 5 — what's *not* wired
+
+- **`flag` / `approveFlag` / `rejectFlag`** — settlement-level disputes don't map 1:1 to BE expense disputes. Next-chunk plan: map a disputed transfer → the most recent unsettled expense between the two parties in that group, file a Dispute against it.
+- **`listMessages` / `sendMessage`** — no `Message` model on BE. Either ship one (new schema + polling endpoint) or stay on demo.
+- **`goalFromSettlement` / `fundGoal`** — atom-blocked, needs slice infra.
+- **`status` and `ledger`** are partial: BE fallback wired, demo still tried first.
+
+### 16G. PR 5 verification
+
+- `npm run typecheck` ✓, `npm run lint --max-warnings=0` ✓, `npm test` → **77 / 77 vitest** (added 5 storage + 3 storage-registry tests in PR 4.5)
+- `npm run build` ✓
+- **Newman e2e**: **71 reqs / 96 assertions / 0 failures** (up from 64/85 in PR 4.5; 6 new requests from the Invites folder + the `GET /receipts/:id/image` endpoint)
+- Real-bill round-trip with real Claude end-to-end OK
+
+---
+
+## 17. Current position (end of PR 5)
+
+| Layer | Count | Notes |
+| --- | --- | --- |
+| BE routes shipped | 60+ | Across auth/groups/expenses/settlements/balances/contacts/receipts/commands/disputes/guest-splits/invites |
+| Vitest unit tests | **77 / 77** | Pure libs + tools + sanitizer + storage + registry |
+| Newman e2e | **71 reqs / 96 assertions / 0 failures** | Real Claude in the loop |
+| FE methods BE-wired | **13 / 24 (54%)** | + 3 net-new helpers |
+| Proposal coverage (estimate) | ~70% | §05 atom blocked; §04 + §02 core loop demo-ready |
+| Demo readiness | Beats 1 + 3 entirely on BE | Beat 2 needs atom (blocked) |
+| Open BE-side work | dispute mapping for flag/approveFlag/rejectFlag; Message model for chat (optional) | |
+| Open FE-side work | invite-landing page; @-mention picker UI hookup; UI tests | |
+| Blocked on slice | atom Split-to-Save, real UPI/slice Pay rails, in-VPC Bedrock | |

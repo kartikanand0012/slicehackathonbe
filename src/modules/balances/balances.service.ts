@@ -43,7 +43,10 @@ export async function getGroupBalances(
   // Pull everything we need in three queries.
   const [members, expensesWithShares, settlements] = await Promise.all([
     prisma.groupMember.findMany({
-      where: { groupId, leftAt: null },
+      // Balances are computed only over platform-user members. Contact-only
+      // members can sit in the group (PR 5 B-1 invite flow) but they carry
+      // no ExpenseShare rows yet, so they don't contribute to balances.
+      where: { groupId, leftAt: null, userId: { not: null } },
       select: {
         user: {
           select: { id: true, name: true, email: true, upiHandle: true },
@@ -63,7 +66,9 @@ export async function getGroupBalances(
     }),
   ]);
 
-  const memberIndex = new Map(members.map((m) => [m.user.id, m.user]));
+  const memberIndex = new Map(
+    members.flatMap((m) => (m.user ? [[m.user.id, m.user] as const] : [])),
+  );
 
   const raw = computeBalances(
     expensesWithShares.map((e) => ({

@@ -30,7 +30,7 @@ services:
       NODE_ENV: production
       PORT: 4000
       DATABASE_URL: postgresql://${DB_USER:-slicesplit}:${DB_PASSWORD:-slicesplit}@postgres:5432/${DB_NAME:-slicesplit}?schema=public
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required — generate one with: openssl rand -base64 48}
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is required - generate one with openssl rand -base64 48}"
       JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
       JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-30d}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}

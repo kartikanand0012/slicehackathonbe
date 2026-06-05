@@ -11,3 +11,7 @@ src/generated
 
 # Internal reference docs
 *.pdf
+
+# Newman test artefacts
+tests/e2e/reports/
+tests/e2e/slicesplit-backend.e2e.postman_collection.json

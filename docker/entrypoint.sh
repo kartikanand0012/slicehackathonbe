@@ -23,18 +23,20 @@ esac
 
 # ── Wait for Postgres ──
 # Parses host/port out of DATABASE_URL via Node so we don't pull in extra tools.
+# IMPORTANT: do NOT name these `HOST` / `PORT` — those collide with env vars
+# the app reads (PORT is the HTTP listen port). Use PG_* names to be safe.
 WAIT_HOST_PORT=$(node -e "
   const u = new URL(process.env.DATABASE_URL);
   process.stdout.write(\`\${u.hostname} \${u.port || 5432}\`);
 ")
-HOST=$(echo "$WAIT_HOST_PORT" | awk '{print $1}')
-PORT=$(echo "$WAIT_HOST_PORT" | awk '{print $2}')
+PG_HOST=$(echo "$WAIT_HOST_PORT" | awk '{print $1}')
+PG_PORT=$(echo "$WAIT_HOST_PORT" | awk '{print $2}')
 
-log "Waiting for Postgres at $HOST:$PORT ..."
+log "Waiting for Postgres at $PG_HOST:$PG_PORT ..."
 TRIES=0
 until node -e "
   const net = require('node:net');
-  const s = net.connect({ host: '$HOST', port: $PORT });
+  const s = net.connect({ host: '$PG_HOST', port: $PG_PORT });
   s.once('connect', () => { s.end(); process.exit(0); });
   s.once('error',   () => process.exit(1));
   setTimeout(() => process.exit(1), 1500);

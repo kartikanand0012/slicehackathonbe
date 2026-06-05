@@ -1,0 +1,27 @@
+{
+  "id": "e2e-newman-env",
+  "name": "SliceSplit e2e (Newman)",
+  "values": [
+    { "key": "base_url", "value": "http://localhost:4000", "enabled": true },
+    { "key": "api_prefix", "value": "/api/v1", "enabled": true },
+    { "key": "access_token", "value": "", "enabled": true },
+    { "key": "refresh_token", "value": "", "enabled": true },
+    { "key": "user_id", "value": "", "enabled": true },
+    { "key": "user_a_id", "value": "", "enabled": true },
+    { "key": "user_b_id", "value": "", "enabled": true },
+    { "key": "user_c_id", "value": "", "enabled": true },
+    { "key": "alice_email", "value": "", "enabled": true },
+    { "key": "bob_email", "value": "", "enabled": true },
+    { "key": "charlie_email", "value": "", "enabled": true },
+    { "key": "group_id", "value": "", "enabled": true },
+    { "key": "expense_id", "value": "", "enabled": true },
+    { "key": "contact_id", "value": "", "enabled": true },
+    { "key": "receipt_id", "value": "", "enabled": true },
+    { "key": "guest_split_id", "value": "", "enabled": true },
+    { "key": "share_token", "value": "", "enabled": true },
+    { "key": "claim_token", "value": "", "enabled": true },
+    { "key": "command_run_id", "value": "", "enabled": true },
+    { "key": "run_id", "value": "", "enabled": true }
+  ],
+  "_postman_variable_scope": "environment"
+}

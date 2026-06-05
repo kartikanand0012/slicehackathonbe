@@ -5,6 +5,9 @@
 generator client {
   provider        = "prisma-client-js"
   previewFeatures = ["postgresqlExtensions"]
+  // `native` for local dev; the linux-musl-openssl-3.0.x targets are for the
+  // Alpine container in docker/. Add more here if you deploy to another libc/arch.
+  binaryTargets   = ["native", "linux-musl-arm64-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {

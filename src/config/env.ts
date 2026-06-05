@@ -26,6 +26,13 @@ const EnvSchema = z.object({
 
   AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(5),
   AUTH_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+
+  UPLOAD_DIR: z.string().default("./uploads"),
+  MAX_UPLOAD_MB: z.coerce.number().int().positive().max(50).default(10),
+
+  AI_PROVIDER_PRIORITY: z.string().optional(),
+  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_MODEL: z.string().optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

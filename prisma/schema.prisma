@@ -21,7 +21,7 @@ model User {
   name         String
   passwordHash String
   avatarUrl    String?
-  upiHandle    String?  // for future settle-up via UPI deep link
+  upiHandle    String? // for future settle-up via UPI deep link
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -35,6 +35,8 @@ model User {
   contactLinked   Contact[]      @relation("ContactLinkedUser")
   refreshTokens   RefreshToken[]
   auditEvents     AuditEvent[]
+  receipts        Receipt[]
+  guestSplits     GuestSplit[]   @relation("GuestSplitCreatedBy")
 
   @@index([phone])
 }
@@ -61,11 +63,11 @@ model RefreshToken {
 
 model Contact {
   id           String   @id @default(cuid())
-  ownerId      String   // the user who added this contact
+  ownerId      String // the user who added this contact
   displayName  String
   phone        String?
   email        String?
-  linkedUserId String?  // set when this contact matches a real platform User
+  linkedUserId String? // set when this contact matches a real platform User
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -95,6 +97,8 @@ model Group {
   settlements Settlement[]
   invites     GroupInvite[]
   auditEvents AuditEvent[]
+  receipts    Receipt[]
+  guestSplits GuestSplit[]
 }
 
 enum GroupRole {
@@ -149,7 +153,7 @@ model Expense {
   groupId     String
   title       String
   notes       String?
-  amountPaise Int       // total amount in paise
+  amountPaise Int // total amount in paise
   category    String?
   occurredAt  DateTime  @default(now())
   splitMode   SplitMode @default(EQUAL)
@@ -169,12 +173,12 @@ model Expense {
 }
 
 model ExpenseShare {
-  id           String @id @default(cuid())
-  expenseId    String
-  userId       String
-  amountPaise  Int    // this user's share in paise (always the final settled value)
-  shares       Int    @default(1)     // raw share units, used in SHARES mode
-  basisPoints  Int?   // 1/100 of a percent, used in PERCENTAGE mode (5000 = 50.00%)
+  id          String @id @default(cuid())
+  expenseId   String
+  userId      String
+  amountPaise Int // this user's share in paise (always the final settled value)
+  shares      Int    @default(1) // raw share units, used in SHARES mode
+  basisPoints Int? // 1/100 of a percent, used in PERCENTAGE mode (5000 = 50.00%)
 
   expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
   user    User    @relation(fields: [userId], references: [id])
@@ -191,7 +195,7 @@ model Settlement {
   fromId      String
   toId        String
   amountPaise Int
-  method      String?  // e.g. "UPI", "CASH"; freeform for PR 1
+  method      String? // e.g. "UPI", "CASH"; freeform for PR 1
   note        String?
   settledAt   DateTime @default(now())
   createdAt   DateTime @default(now())
@@ -223,6 +227,11 @@ enum AuditAction {
   SETTLEMENT_CREATED
   INVITE_CREATED
   INVITE_REDEEMED
+  RECEIPT_UPLOADED
+  RECEIPT_EXTRACTED
+  RECEIPT_CONVERTED
+  GUEST_SPLIT_CREATED
+  GUEST_SPLIT_FINALIZED
 }
 
 model AuditEvent {
@@ -230,7 +239,7 @@ model AuditEvent {
   actorId   String?
   groupId   String?
   action    AuditAction
-  entityId  String?     // polymorphic reference
+  entityId  String? // polymorphic reference
   metadata  Json?
   createdAt DateTime    @default(now())
 
@@ -240,4 +249,140 @@ model AuditEvent {
   @@index([actorId, createdAt])
   @@index([groupId, createdAt])
   @@index([action, createdAt])
+}
+
+// ─── RECEIPTS & AI ─────────────────────────────────────────
+// A Receipt is an uploaded image that's been processed by an AI provider to
+// extract line items. The extraction result is then optionally converted
+// into a real Expense (for a group) or a GuestSplit (for no-auth claim flow).
+
+enum ReceiptStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model Receipt {
+  id            String        @id @default(cuid())
+  uploadedById  String
+  groupId       String? // null when used for guest-split or unattached
+  imagePath     String // path on disk (or s3 key later)
+  originalName  String
+  mimeType      String
+  fileSize      Int
+  status        ReceiptStatus @default(PENDING)
+  aiProvider    String?
+  errorReason   String?
+  merchantName  String?
+  occurredAt    DateTime?
+  subtotalPaise Int?
+  taxPaise      Int?
+  tipPaise      Int?
+  totalPaise    Int?
+  rawResponse   Json?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  uploadedBy User          @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
+  group      Group?        @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  items      ReceiptItem[]
+  guestSplit GuestSplit?
+
+  @@index([uploadedById, createdAt(sort: Desc)])
+  @@index([groupId, createdAt(sort: Desc)])
+}
+
+model ReceiptItem {
+  id         String @id @default(cuid())
+  receiptId  String
+  name       String
+  quantity   Int    @default(1)
+  unitPaise  Int
+  totalPaise Int
+  sortOrder  Int    @default(0)
+
+  receipt Receipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+
+  @@index([receiptId])
+}
+
+// ─── GUEST SPLITS (no-auth shareable bills) ───────────────
+// A GuestSplit gives a non-authenticated person a tokenized URL to claim
+// items off a receipt. State machine: CLAIMING → FINALIZED.
+
+enum GuestSplitStatus {
+  CLAIMING
+  FINALIZED
+}
+
+model GuestSplit {
+  id           String           @id @default(cuid())
+  shareToken   String           @unique @default(cuid())
+  status       GuestSplitStatus @default(CLAIMING)
+  createdById  String
+  receiptId    String?          @unique
+  groupId      String? // set if eventually attached to a group
+  merchantName String?
+  totalPaise   Int
+  taxPaise     Int?
+  tipPaise     Int?
+  expiresAt    DateTime?
+  finalizedAt  DateTime?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  createdBy User               @relation("GuestSplitCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  receipt   Receipt?           @relation(fields: [receiptId], references: [id], onDelete: SetNull)
+  group     Group?             @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  items     GuestSplitItem[]
+  people    GuestSplitPerson[]
+
+  @@index([createdById])
+  @@index([shareToken])
+  @@index([status])
+}
+
+model GuestSplitItem {
+  id           String @id @default(cuid())
+  guestSplitId String
+  name         String
+  quantity     Int    @default(1)
+  unitPaise    Int
+  totalPaise   Int
+  sortOrder    Int    @default(0)
+
+  guestSplit  GuestSplit             @relation(fields: [guestSplitId], references: [id], onDelete: Cascade)
+  assignments GuestSplitAssignment[]
+
+  @@index([guestSplitId])
+}
+
+model GuestSplitPerson {
+  id           String   @id @default(cuid())
+  guestSplitId String
+  name         String
+  claimToken   String   @unique @default(cuid())
+  upiHandle    String?
+  createdAt    DateTime @default(now())
+
+  guestSplit  GuestSplit             @relation(fields: [guestSplitId], references: [id], onDelete: Cascade)
+  assignments GuestSplitAssignment[]
+
+  @@unique([guestSplitId, name])
+  @@index([guestSplitId])
+}
+
+model GuestSplitAssignment {
+  id         String @id @default(cuid())
+  itemId     String
+  personId   String
+  shareUnits Int    @default(1)
+
+  item   GuestSplitItem   @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  person GuestSplitPerson @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, personId])
+  @@index([itemId])
+  @@index([personId])
 }

@@ -286,4 +286,76 @@ slicesplit-backend/
 | PR | Status | Highlights |
 | --- | --- | --- |
 | PR 1 — backend foundation | ✅ shipped | TS+Express+Prisma+JWT, balance engine ported with 25 tests, Docker single-click, Postman collection |
-| PR 2 — AI + guest splits + frontend wire-up | ⏳ next | expense/settlement routes, AI provider registry, receipt pipeline, guest-split state machine |
+| PR 2 — domain features + AI + guest splits | ✅ shipped | expense/settlement/balance routes, contacts, UPI deep-links, AI provider registry + receipt pipeline, guest-split state machine |
+
+---
+
+## 11. PR 2 — what was added
+
+PR 2 fills in the domain features the hackathon demo runs on.
+
+### A. New libs
+
+- **`src/lib/upi.ts`** — UPI deep-link generator (`upi://pay?...`). Validates VPAs (`alice@okhdfc` style), formats amount as 2-decimal rupees on the wire while keeping paise internal. Tested.
+- **`src/lib/split-calculator.ts`** — Pure split engine for all `SplitMode`s. Guarantees `sum(shares) === total`:
+  - `EQUAL` — uses `splitEqualPaise`, distributes remainder to leading users sorted by `userId`.
+  - `EXACT` — validates user shares sum to total.
+  - `PERCENTAGE` — basis-points (10000 = 100%), proportional with remainder distribution.
+  - `SHARES` — share-unit weights, proportional with remainder distribution.
+
+### B. Domain modules added (`src/modules/`)
+
+| Module | Routes |
+| --- | --- |
+| `expenses/` | `GET / POST` (list, create) and `GET / PATCH / DELETE /:expenseId` under `/groups/:groupId/expenses` — soft-delete, transactional share replacement on update, only payer / creator / admin can delete. |
+| `settlements/` | `GET / POST` under `/groups/:groupId/settlements` — validates both parties are active group members. |
+| `balances/` | `GET /groups/:groupId/balances` — runs the engine + `simplifyDebts`, attaches a `upiIntent` deep-link for every transfer whose recipient has set a UPI handle. |
+| `contacts/` | Owner-scoped address-book CRUD. Auto-links contacts to platform users when phone/email matches an existing user. |
+| `receipts/` | `POST /receipts/extract` (multipart upload → AI provider → structured items), `GET /receipts`, `GET /receipts/:id`, `POST /receipts/:id/convert` (turns a receipt into a real Expense). |
+| `guest/` | Authenticated owner routes under `/guest-splits` + public share-token routes under `/g/:shareToken`: add person → claim items → finalize. The finalize step computes per-person totals including proportional tax/tip allocation. |
+
+### C. AI provider layer (`src/ai/`)
+
+- **`types.ts`** — `ReceiptExtractor` interface, `ExtractedReceipt` DTO. Provider-agnostic.
+- **`prompts/receipt-extraction.ts`** — Single source of truth for the extraction system prompt. Embedded by concrete providers in whatever format they need (chat message, tool call, etc).
+- **`providers/mock.ts`** — Always available; returns canned data. Used in dev + tests.
+- **`providers/openai.ts`** — Real OpenAI chat-completions call with JSON mode, `gpt-4o-mini` default, no SDK dependency (raw `fetch`). Disabled unless `OPENAI_API_KEY` is set.
+- **`registry.ts`** — Picks a provider based on `AI_PROVIDER_PRIORITY` env (default `openai,mock`); falls back to mock so the demo always works. Caches the pick.
+
+### D. Prisma schema additions
+
+- `Receipt` + `ReceiptItem` — extracted line items + status machine (`PENDING → PROCESSING → COMPLETED|FAILED`), stores AI provider name and raw response for audit.
+- `GuestSplit` + `GuestSplitItem` + `GuestSplitPerson` + `GuestSplitAssignment` — guest-split state machine (`CLAIMING → FINALIZED`), token-scoped access via `shareToken` (public) and per-person `claimToken` (private).
+- New `AuditAction` enum entries: `RECEIPT_UPLOADED`, `RECEIPT_EXTRACTED`, `RECEIPT_CONVERTED`, `GUEST_SPLIT_CREATED`, `GUEST_SPLIT_FINALIZED`.
+
+### E. Config + tooling
+
+- **`env.ts`** — new fields: `UPLOAD_DIR`, `MAX_UPLOAD_MB`, `AI_PROVIDER_PRIORITY`, `OPENAI_API_KEY`, `OPENAI_MODEL`.
+- **`.env.example`** — documents the new env block.
+- **`vitest.setup.ts` + `vitest.config.ts:env`** — injects test-safe env vars so test files transitively importing `@/config/env` don't crash on missing config.
+
+### F. Postman collection expansion
+
+Added folders: **Expenses** (with one example per split mode), **Settlements**, **Balances**, **Contacts**, **Receipts** (incl. multipart `/extract`), **Guest Splits (Owner)**, **Guest Splits (Public)**. Test scripts auto-capture `expense_id`, `contact_id`, `receipt_id`, `guest_split_id`, `share_token`, `claim_token`. New env keys added to both environments.
+
+### G. Tests added (vitest)
+
+Pure-function coverage only — DB tests come with testcontainers in PR 3.
+
+| File | Tests |
+| --- | --- |
+| `src/lib/split-calculator.test.ts` | 11 — every mode + guardrails |
+| `src/lib/upi.test.ts` | 7 — VPA validation + URI encoding |
+| `src/ai/registry.test.ts` | 4 — provider selection + cache |
+| `src/modules/guest/guest.service.test.ts` | 3 — proportional split math |
+
+Cumulative: **50 / 50 tests pass** (PR 1 carryover + PR 2 additions).
+
+### H. Optimizations over the ShareTab reference
+
+- Pure split calculator separated from expense-creation transaction — easy to unit test and reuse for receipts.
+- Remainder distribution is done with a deterministic `userId.localeCompare` sort across all split modes — outputs are stable across servers and test runs.
+- Provider registry caches its pick instead of re-resolving on every extract call.
+- OpenAI provider uses native `fetch` + JSON mode, so the build stays slim and there's no SDK to keep on the latest version.
+- Guest-split finalize allocates tax/tip proportionally with the same paise-preserving remainder logic — guarantees no rupee is lost.
+- Receipts hide existence (`404` instead of `403`) when accessed by non-owner — small but matters for not leaking IDs.

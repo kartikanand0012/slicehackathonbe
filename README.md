@@ -2,22 +2,33 @@
 
 INR-first expense-splitting backend for the Slice hackathon. Express + Prisma + Postgres, JWT auth, paise precision throughout.
 
-## What's in PR 1
+## What's shipped (PR 1 + PR 2)
+
+### Foundation (PR 1)
 
 - TypeScript + Express + Prisma + Postgres
 - JWT auth (register / login / refresh-rotate / logout) with argon2id password hashing
 - Prisma schema: `User`, `Contact`, `Group`, `GroupMember`, `GroupInvite`, `Expense`, `ExpenseShare`, `Settlement`, `AuditEvent`, `RefreshToken`
 - Balance engine ported from ShareTab (multi-currency stripped) with vitest coverage
-- Core CRUD: `/api/v1/{health,auth,me,groups}`
 - Dockerfile + docker-compose with bundled Postgres → `docker compose up` works end-to-end
 - Structured logging (pino), helmet, CORS allowlist, per-IP rate limiting
 
-## Deferred to PR 2
+### Domain + AI (PR 2)
 
-- AI provider registry + receipt extraction pipeline
-- Guest-split state machine (no-auth shareable bills)
-- Expense + settlement HTTP routes (engine is ready, routes pending)
-- Wire-up with the React frontend
+- **Expenses** with full split-mode coverage (EQUAL / EXACT / PERCENTAGE / SHARES), transactional share replacement on update, soft-delete
+- **Settlements** scoped to group members
+- **Balances** endpoint that runs the engine and returns per-member balances + minimal transfers + **UPI deep-link intents** (`upi://pay?...`)
+- **Contacts** address-book, auto-linked to platform users on phone/email match
+- **AI provider registry**: pluggable receipt extractor (`mock`, `openai`); env-driven priority; mock fallback so the demo always works
+- **Receipts**: multipart upload → AI extraction → list/get → convert into a real Expense
+- **Guest splits**: no-auth share token + per-person claim tokens; `CLAIMING → FINALIZED` state machine; proportional tax/tip allocation on finalize
+- Receipt models, Guest-split models, and 5 new `AuditAction` entries in Prisma
+
+## Deferred to PR 3
+
+- Real Prisma migrations folder (replaces first-run `db push`)
+- Integration tests against a real Postgres (testcontainers)
+- Frontend wire-up
 
 ## Local development
 
@@ -43,20 +54,40 @@ docker compose -f docker/docker-compose.yml up --build
 
 | Method | Path                                  | Auth |
 | ------ | ------------------------------------- | ---- |
-| GET    | `/api/v1/health/live`                 | —    |
-| GET    | `/api/v1/health/ready`                | —    |
-| POST   | `/api/v1/auth/register`               | —    |
-| POST   | `/api/v1/auth/login`                  | —    |
-| POST   | `/api/v1/auth/refresh`                | —    |
-| POST   | `/api/v1/auth/logout`                 | —    |
-| GET    | `/api/v1/me`                          | ✓    |
-| PATCH  | `/api/v1/me`                          | ✓    |
-| GET    | `/api/v1/groups`                      | ✓    |
-| POST   | `/api/v1/groups`                      | ✓    |
-| GET    | `/api/v1/groups/:groupId`             | ✓    |
-| PATCH  | `/api/v1/groups/:groupId`             | ✓    |
-| POST   | `/api/v1/groups/:groupId/members`     | ✓    |
-| DELETE | `/api/v1/groups/:groupId/members/:userId` | ✓ |
+| GET    | `/api/v1/health/{live,ready}`               | —    |
+| POST   | `/api/v1/auth/{register,login,refresh,logout}` | — |
+| GET    | `/api/v1/me`                                | ✓    |
+| PATCH  | `/api/v1/me`                                | ✓    |
+| GET    | `/api/v1/groups`                            | ✓    |
+| POST   | `/api/v1/groups`                            | ✓    |
+| GET    | `/api/v1/groups/:groupId`                   | ✓    |
+| PATCH  | `/api/v1/groups/:groupId`                   | ✓    |
+| POST   | `/api/v1/groups/:groupId/members`           | ✓    |
+| DELETE | `/api/v1/groups/:groupId/members/:userId`   | ✓    |
+| GET    | `/api/v1/groups/:groupId/expenses`          | ✓    |
+| POST   | `/api/v1/groups/:groupId/expenses`          | ✓    |
+| GET    | `/api/v1/groups/:groupId/expenses/:id`      | ✓    |
+| PATCH  | `/api/v1/groups/:groupId/expenses/:id`      | ✓    |
+| DELETE | `/api/v1/groups/:groupId/expenses/:id`      | ✓    |
+| GET    | `/api/v1/groups/:groupId/settlements`       | ✓    |
+| POST   | `/api/v1/groups/:groupId/settlements`       | ✓    |
+| GET    | `/api/v1/groups/:groupId/balances`          | ✓    |
+| GET    | `/api/v1/contacts`                          | ✓    |
+| POST   | `/api/v1/contacts`                          | ✓    |
+| PATCH  | `/api/v1/contacts/:id`                      | ✓    |
+| DELETE | `/api/v1/contacts/:id`                      | ✓    |
+| GET    | `/api/v1/receipts`                          | ✓    |
+| POST   | `/api/v1/receipts/extract` (multipart)      | ✓    |
+| GET    | `/api/v1/receipts/:id`                      | ✓    |
+| POST   | `/api/v1/receipts/:id/convert`              | ✓    |
+| GET    | `/api/v1/guest-splits`                      | ✓    |
+| POST   | `/api/v1/guest-splits`                      | ✓    |
+| GET    | `/api/v1/guest-splits/:id`                  | ✓    |
+| GET    | `/api/v1/g/:shareToken`                     | —    |
+| POST   | `/api/v1/g/:shareToken/people`              | —    |
+| POST   | `/api/v1/g/:shareToken/claims`              | —    |
+| DELETE | `/api/v1/g/:shareToken/claims`              | —    |
+| POST   | `/api/v1/g/:shareToken/finalize`            | ✓    |
 
 ## Tests
 

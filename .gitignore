@@ -18,3 +18,7 @@ tests/e2e/slicesplit-backend.e2e.postman_collection.json
 
 # Runtime upload directory — receipt images written here at upload time
 uploads/
+
+# Real bill photos the user adds for AI testing — may contain PII (card
+# last-4, phone numbers, GST). Keep local.
+bills/

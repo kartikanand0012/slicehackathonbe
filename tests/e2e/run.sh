@@ -81,7 +81,7 @@ set +e
 "$NEWMAN_BIN" run tests/e2e/slicesplit-backend.e2e.postman_collection.json \
   -e tests/e2e/environment.json \
   --working-dir tests/e2e \
-  --delay-request 250 \
+  --delay-request 500 \
   --reporters cli,json,htmlextra \
   --reporter-json-export tests/e2e/reports/newman-report.json \
   --reporter-htmlextra-export tests/e2e/reports/newman-report.html \

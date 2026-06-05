@@ -26,8 +26,11 @@ import {
   INTENT_PARSER_SYSTEM_PROMPT,
 } from "../prompts/intent-parser";
 
-const DEFAULT_RECEIPT_MODEL = "claude-3-5-haiku-20241022";
-const DEFAULT_INTENT_MODEL = "claude-3-5-sonnet-20241022";
+// Defaults track the model the team's old slicehackathon2 codebase was
+// already running on. Override via env if you want to pin a different
+// tier. Receipt uses Haiku (cheap, plenty for OCR); intent uses Sonnet.
+const DEFAULT_RECEIPT_MODEL = "claude-haiku-4-5-20251001";
+const DEFAULT_INTENT_MODEL = "claude-sonnet-4-6";
 
 export class AnthropicProvider implements ReceiptExtractor, IntentParser {
   readonly name = "anthropic";

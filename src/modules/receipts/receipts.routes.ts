@@ -82,6 +82,24 @@ router.get(
   }),
 );
 
+// Stream the raw image bytes. Used as the imageUrl target for the LOCAL
+// storage backend (S3-backed receipts get a direct presigned S3 URL and
+// the FE never hits this endpoint).
+router.get(
+  "/:receiptId/image",
+  validateParams(ReceiptParams),
+  asyncHandler(async (req, res) => {
+    const { receiptId } = req.params as unknown as { receiptId: string };
+    const { buffer, mimeType } = await service.getReceiptImageBuffer(
+      req.user!.id,
+      receiptId,
+    );
+    res.setHeader("Content-Type", mimeType);
+    res.setHeader("Cache-Control", "private, max-age=600");
+    res.send(buffer);
+  }),
+);
+
 router.post(
   "/:receiptId/convert",
   validateParams(ReceiptParams),

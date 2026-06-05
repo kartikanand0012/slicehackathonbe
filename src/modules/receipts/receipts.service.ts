@@ -1,12 +1,17 @@
 import path from "node:path";
-import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import type { StorageBackend as StorageBackendEnum } from "@prisma/client";
 import { prisma } from "@/db/prisma";
 import { logger } from "@/lib/logger";
 import { BadRequestError, NotFoundError } from "@/lib/errors";
 import { sha256Hex } from "@/lib/sha256";
 import { getReceiptExtractor } from "@/ai/registry";
 import { env } from "@/config/env";
+import {
+  getStorageBackend,
+  getStorageBackendByName,
+  type StorageBackendName,
+} from "@/storage";
 import * as expensesService from "@/modules/expenses/expenses.service";
 import { sanitizeExtractedReceipt } from "./receipts.sanitizer";
 import type {
@@ -36,6 +41,8 @@ const RECEIPT_PUBLIC_SELECT = {
   hint: true,
   processingStartedAt: true,
   processingFinishedAt: true,
+  storageBackend: true,
+  imagePath: true,
   createdAt: true,
   updatedAt: true,
   items: {
@@ -52,21 +59,60 @@ const RECEIPT_PUBLIC_SELECT = {
   },
 } as const;
 
+/**
+ * Build the URL the FE should use to render the receipt image.
+ *
+ *   - S3-backed receipt → presigned GET URL (TTL = S3_PRESIGN_EXPIRY_SECONDS)
+ *   - Local-backed receipt → authenticated API URL `/receipts/:id/image`
+ *
+ * Returning a URL (not bytes) keeps list/get responses cheap and lets the
+ * FE pull images directly. We read the per-row `storageBackend` enum so
+ * old LOCAL receipts keep working even after prod flips STORAGE_BACKEND=s3.
+ */
+async function buildImageUrl(receipt: {
+  id: string;
+  imagePath: string;
+  storageBackend: StorageBackendEnum;
+}): Promise<string> {
+  const backendName = receipt.storageBackend.toLowerCase() as StorageBackendName;
+  if (backendName === "s3") {
+    try {
+      const url = await getStorageBackendByName("s3").signedGetUrl(
+        receipt.imagePath,
+        env.S3_PRESIGN_EXPIRY_SECONDS,
+      );
+      if (url) return url;
+    } catch (err) {
+      logger.warn({ err, receiptId: receipt.id }, "Presign failed; falling back to API URL");
+    }
+  }
+  return `${env.PUBLIC_BASE_URL}/api/v1/receipts/${receipt.id}/image`;
+}
+
+type ReceiptRow = {
+  id: string;
+  imagePath: string;
+  storageBackend: StorageBackendEnum;
+  [k: string]: unknown;
+};
+
+async function withImageUrl<T extends ReceiptRow>(r: T): Promise<T & { imageUrl: string }> {
+  return { ...r, imageUrl: await buildImageUrl(r) };
+}
+
+async function withImageUrls<T extends ReceiptRow>(rows: T[]) {
+  return Promise.all(rows.map((r) => withImageUrl(r)));
+}
+
 const MAX_EXTRACTION_ATTEMPTS = 3;
 const RETRY_BACKOFF_MS = [500, 2000, 5000];
 
 /** Window inside which a hash match counts as a duplicate. */
 const DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-async function ensureUploadDir(): Promise<string> {
-  const dir = path.resolve(env.UPLOAD_DIR);
-  await fs.mkdir(dir, { recursive: true });
-  return dir;
-}
-
 /**
- * Step 1 — synchronous: dedup-check, persist the upload, return immediately
- * with status PROCESSING. Caller polls `GET /receipts/:id`.
+ * Step 1 — synchronous: dedup-check, persist to the active storage backend,
+ * return immediately with status PROCESSING. Caller polls `GET /receipts/:id`.
  *
  * Step 2 — background: `runExtraction(receiptId)` (kicked off via
  * setImmediate so the HTTP response can flush first).
@@ -87,7 +133,7 @@ export async function uploadReceipt(input: {
   const imageSha256 = sha256Hex(input.file.buffer);
 
   // Dedup: if the same user uploaded the same bytes recently, return that
-  // existing receipt instead of re-running OCR.
+  // existing receipt instead of re-running OCR (and re-writing to storage).
   const since = new Date(Date.now() - DEDUP_WINDOW_MS);
   const existing = await prisma.receipt.findFirst({
     where: {
@@ -116,17 +162,21 @@ export async function uploadReceipt(input: {
     };
   }
 
-  const dir = await ensureUploadDir();
+  const backend = getStorageBackend();
   const ext = path.extname(input.file.originalname) || ".bin";
-  const stored = `${randomUUID()}${ext}`;
-  const imagePath = path.join(dir, stored);
-  await fs.writeFile(imagePath, input.file.buffer);
+  const objectKey = `receipts/${input.userId}/${randomUUID()}${ext}`;
+  await backend.put({
+    key: objectKey,
+    body: input.file.buffer,
+    mimeType: input.file.mimetype,
+  });
 
   const receipt = await prisma.receipt.create({
     data: {
       uploadedById: input.userId,
       groupId: input.groupId,
-      imagePath,
+      imagePath: objectKey,
+      storageBackend: backend.name === "s3" ? "S3" : "LOCAL",
       imageSha256,
       originalName: input.file.originalname,
       mimeType: input.file.mimetype,
@@ -281,7 +331,7 @@ export async function readReceipt(receiptId: string) {
     select: RECEIPT_PUBLIC_SELECT,
   });
   if (!r) throw new NotFoundError("Receipt not found");
-  return r;
+  return withImageUrl(r);
 }
 
 export async function getReceipt(userId: string, receiptId: string) {
@@ -291,7 +341,7 @@ export async function getReceipt(userId: string, receiptId: string) {
   });
   if (!r) throw new NotFoundError("Receipt not found");
   if (r.uploadedById !== userId) throw new NotFoundError("Receipt not found");
-  return r;
+  return withImageUrl(r);
 }
 
 export async function listReceipts(userId: string, query: ListReceiptsQuery) {
@@ -304,7 +354,26 @@ export async function listReceipts(userId: string, query: ListReceiptsQuery) {
     orderBy: { createdAt: "desc" },
     take: query.limit,
   });
-  return { items: rows };
+  return { items: await withImageUrls(rows) };
+}
+
+/**
+ * Stream the raw image bytes from the per-row storage backend. Auth check
+ * happens in the route. For S3-backed receipts the FE skips this endpoint
+ * and hits the presigned S3 URL directly.
+ */
+export async function getReceiptImageBuffer(
+  userId: string,
+  receiptId: string,
+): Promise<{ buffer: Buffer; mimeType: string }> {
+  const r = await prisma.receipt.findUnique({
+    where: { id: receiptId },
+    select: { uploadedById: true, imagePath: true, mimeType: true, storageBackend: true },
+  });
+  if (!r || r.uploadedById !== userId) throw new NotFoundError("Receipt not found");
+  const backendName = r.storageBackend.toLowerCase() as StorageBackendName;
+  const buffer = await getStorageBackendByName(backendName).get(r.imagePath);
+  return { buffer, mimeType: r.mimeType };
 }
 
 export async function convertReceiptToExpense(

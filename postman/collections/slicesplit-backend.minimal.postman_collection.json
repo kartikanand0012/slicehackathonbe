@@ -1,0 +1,78 @@
+{
+  "info": {
+    "name": "SliceSplit Backend (minimal smoke)",
+    "_postman_id": "f1e2d3c4-5b6a-4789-9012-345678901234",
+    "description": "Five-request smoke test to verify Postman import + Bearer auth + the receipt-async flow work for you. If this imports + runs green, the full collection at postman/collections/slicesplit-backend.postman_collection.json will too.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:4000" }
+  ],
+  "item": [
+    {
+      "name": "Health — Liveness",
+      "request": {
+        "method": "GET",
+        "auth": { "type": "noauth" },
+        "url": "{{base_url}}/api/v1/health/live"
+      }
+    },
+    {
+      "name": "Register",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "if (pm.response.code === 201) {",
+              "  pm.collectionVariables.set('access_token', pm.response.json().accessToken);",
+              "  pm.collectionVariables.set('user_id', pm.response.json().user.id);",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "auth": { "type": "noauth" },
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"smoke-test@e2e.local\",\n  \"name\": \"Smoke\",\n  \"password\": \"smoketest123\"\n}"
+        },
+        "url": "{{base_url}}/api/v1/auth/register"
+      }
+    },
+    {
+      "name": "Me",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/v1/me"
+      }
+    },
+    {
+      "name": "Create group",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Smoke group\",\n  \"emoji\": \"🧪\"\n}"
+        },
+        "url": "{{base_url}}/api/v1/groups"
+      }
+    },
+    {
+      "name": "List groups",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/v1/groups?limit=10"
+      }
+    }
+  ]
+}

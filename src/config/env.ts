@@ -30,6 +30,21 @@ const EnvSchema = z.object({
   UPLOAD_DIR: z.string().default("./uploads"),
   MAX_UPLOAD_MB: z.coerce.number().int().positive().max(50).default(10),
 
+  // Public base URL used to build absolute imageUrls for the LOCAL storage
+  // backend. Set to your prod hostname behind your proxy when deploying.
+  PUBLIC_BASE_URL: z.string().url().default("http://localhost:4000"),
+
+  // ── Storage backend (PR 4.5) ──
+  STORAGE_BACKEND: z.enum(["local", "s3"]).default("local"),
+  S3_BUCKET: z.string().optional(),
+  S3_REGION: z.string().optional(), // falls back to AWS_REGION
+  S3_ENDPOINT: z.string().url().optional(), // for MinIO / R2 / Wasabi
+  S3_FORCE_PATH_STYLE: z
+    .string()
+    .optional()
+    .transform((v) => v === "true" || v === "1"),
+  S3_PRESIGN_EXPIRY_SECONDS: z.coerce.number().int().positive().max(86_400).default(900),
+
   AI_PROVIDER_PRIORITY: z.string().optional(),
 
   // Anthropic direct

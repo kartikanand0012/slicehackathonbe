@@ -283,19 +283,28 @@ enum ReceiptStatus {
   FAILED
 }
 
+// Storage backend for the receipt image. Per-row so receipts uploaded under
+// one env (e.g. LOCAL during dev) keep working after the env flips to S3 in
+// prod — no migration script required.
+enum StorageBackend {
+  LOCAL
+  S3
+}
+
 model Receipt {
-  id                   String        @id @default(cuid())
+  id                   String         @id @default(cuid())
   uploadedById         String
   groupId              String? // null when used for guest-split or unattached
-  imagePath            String // path on disk (or s3 key later)
+  imagePath            String // LOCAL: file path on disk. S3: bucket object key.
+  storageBackend       StorageBackend @default(LOCAL)
   imageSha256          String // hex digest — drives idempotent dedup
   originalName         String
   mimeType             String
   fileSize             Int
-  status               ReceiptStatus @default(PENDING)
+  status               ReceiptStatus  @default(PENDING)
   aiProvider           String?
-  attemptCount         Int           @default(0)
-  isDuplicate          Boolean       @default(false)
+  attemptCount         Int            @default(0)
+  isDuplicate          Boolean        @default(false)
   duplicateOfId        String?
   processingStartedAt  DateTime?
   processingFinishedAt DateTime?
@@ -308,8 +317,8 @@ model Receipt {
   totalPaise           Int?
   rawResponse          Json?
   hint                 String?
-  createdAt            DateTime      @default(now())
-  updatedAt            DateTime      @updatedAt
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
 
   uploadedBy  User          @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
   group       Group?        @relation(fields: [groupId], references: [id], onDelete: SetNull)

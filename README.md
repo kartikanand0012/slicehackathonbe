@@ -90,6 +90,7 @@ docker compose -f docker/docker-compose.yml up --build
 | GET    | `/api/v1/receipts`                          | ✓    |
 | POST   | `/api/v1/receipts/extract` (multipart)      | ✓    |
 | GET    | `/api/v1/receipts/:id`                      | ✓    |
+| GET    | `/api/v1/receipts/:id/image` (streams bytes for LOCAL backend) | ✓    |
 | POST   | `/api/v1/receipts/:id/convert`              | ✓    |
 | GET    | `/api/v1/guest-splits`                      | ✓    |
 | POST   | `/api/v1/guest-splits`                      | ✓    |

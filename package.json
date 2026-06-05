@@ -19,6 +19,8 @@
     "prisma:studio": "prisma studio"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.1",
+    "@aws-sdk/client-bedrock-runtime": "^3.1062.0",
     "@prisma/client": "^5.22.0",
     "@types/multer": "^2.1.0",
     "argon2": "^0.41.1",

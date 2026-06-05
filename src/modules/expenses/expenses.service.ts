@@ -58,13 +58,25 @@ function toSplitInput(
   if (s.mode === "EXACT") return { mode: "EXACT", totalPaise, shares: s.shares };
   if (s.mode === "PERCENTAGE")
     return { mode: "PERCENTAGE", totalPaise, shares: s.shares };
-  return { mode: "SHARES", totalPaise, shares: s.shares };
+  if (s.mode === "SHARES") return { mode: "SHARES", totalPaise, shares: s.shares };
+  // CONSTRAINT
+  return {
+    mode: "CONSTRAINT",
+    totalPaise,
+    items: s.items.map((it) => ({
+      name: it.name,
+      totalPaise: it.totalPaise,
+      tags: it.tags ?? [],
+    })),
+    participants: s.participants,
+    commonItemsPaise: s.commonItemsPaise,
+  };
 }
 
 function shareUserIds(split: CreateExpenseBody["split"]): string[] {
-  return split.mode === "EQUAL"
-    ? split.userIds
-    : split.shares.map((s) => s.userId);
+  if (split.mode === "EQUAL") return split.userIds;
+  if (split.mode === "CONSTRAINT") return split.participants.map((p) => p.userId);
+  return split.shares.map((s) => s.userId);
 }
 
 export async function listExpenses(

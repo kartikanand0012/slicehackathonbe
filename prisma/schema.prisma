@@ -37,6 +37,7 @@ model User {
   auditEvents     AuditEvent[]
   receipts        Receipt[]
   guestSplits     GuestSplit[]   @relation("GuestSplitCreatedBy")
+  commandRuns     CommandRun[]
 
   @@index([phone])
 }
@@ -145,7 +146,8 @@ enum SplitMode {
   EXACT
   PERCENTAGE
   SHARES
-  ITEM // reserved for receipt-driven splits (PR 2)
+  ITEM // item-level assignment (claimed items + shared portion)
+  CONSTRAINT // tag-based: each participant may have allow/deny tag lists
 }
 
 model Expense {
@@ -230,8 +232,15 @@ enum AuditAction {
   RECEIPT_UPLOADED
   RECEIPT_EXTRACTED
   RECEIPT_CONVERTED
+  RECEIPT_DUPLICATE
+  RECEIPT_RETRIED
   GUEST_SPLIT_CREATED
   GUEST_SPLIT_FINALIZED
+  COMMAND_PARSED
+  COMMAND_CONFIRMED
+  COMMAND_EXECUTED
+  COMMAND_REJECTED
+  COMMAND_FAILED
 }
 
 model AuditEvent {
@@ -264,43 +273,55 @@ enum ReceiptStatus {
 }
 
 model Receipt {
-  id            String        @id @default(cuid())
-  uploadedById  String
-  groupId       String? // null when used for guest-split or unattached
-  imagePath     String // path on disk (or s3 key later)
-  originalName  String
-  mimeType      String
-  fileSize      Int
-  status        ReceiptStatus @default(PENDING)
-  aiProvider    String?
-  errorReason   String?
-  merchantName  String?
-  occurredAt    DateTime?
-  subtotalPaise Int?
-  taxPaise      Int?
-  tipPaise      Int?
-  totalPaise    Int?
-  rawResponse   Json?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  id                   String        @id @default(cuid())
+  uploadedById         String
+  groupId              String? // null when used for guest-split or unattached
+  imagePath            String // path on disk (or s3 key later)
+  imageSha256          String // hex digest — drives idempotent dedup
+  originalName         String
+  mimeType             String
+  fileSize             Int
+  status               ReceiptStatus @default(PENDING)
+  aiProvider           String?
+  attemptCount         Int           @default(0)
+  isDuplicate          Boolean       @default(false)
+  duplicateOfId        String?
+  processingStartedAt  DateTime?
+  processingFinishedAt DateTime?
+  errorReason          String?
+  merchantName         String?
+  occurredAt           DateTime?
+  subtotalPaise        Int?
+  taxPaise             Int?
+  tipPaise             Int?
+  totalPaise           Int?
+  rawResponse          Json?
+  hint                 String?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
 
-  uploadedBy User          @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
-  group      Group?        @relation(fields: [groupId], references: [id], onDelete: SetNull)
-  items      ReceiptItem[]
-  guestSplit GuestSplit?
+  uploadedBy  User          @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
+  group       Group?        @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  items       ReceiptItem[]
+  guestSplit  GuestSplit?
+  duplicateOf Receipt?      @relation("ReceiptDuplicates", fields: [duplicateOfId], references: [id], onDelete: SetNull)
+  duplicates  Receipt[]     @relation("ReceiptDuplicates")
 
   @@index([uploadedById, createdAt(sort: Desc)])
   @@index([groupId, createdAt(sort: Desc)])
+  @@index([uploadedById, imageSha256])
+  @@index([status])
 }
 
 model ReceiptItem {
-  id         String @id @default(cuid())
+  id         String   @id @default(cuid())
   receiptId  String
   name       String
-  quantity   Int    @default(1)
+  quantity   Int      @default(1)
   unitPaise  Int
   totalPaise Int
-  sortOrder  Int    @default(0)
+  sortOrder  Int      @default(0)
+  tags       String[] @default([]) // model-supplied tags: "veg", "non-veg", "alcohol", "dessert", etc.
 
   receipt Receipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
 
@@ -385,4 +406,42 @@ model GuestSplitAssignment {
   @@unique([itemId, personId])
   @@index([itemId])
   @@index([personId])
+}
+
+// ─── NL COMMAND LAYER ─────────────────────────────────────
+// Every voice or chat utterance is recorded with the full parse + tool-call
+// trace + the dry-run plan that was returned to the user. Confirmation flips
+// `status` to CONFIRMED; the executor then writes EXECUTED with executionResult.
+
+enum CommandStatus {
+  PARSED // intent parsed, plan returned, waiting for confirm
+  CONFIRMED // user confirmed, executor running
+  EXECUTED // success
+  REJECTED // user said no
+  FAILED // parse or execution failed
+}
+
+model CommandRun {
+  id               String        @id @default(cuid())
+  userId           String
+  source           String // "voice" | "chat"
+  status           CommandStatus @default(PARSED)
+  utterance        String
+  contextGroupId   String?
+  contextReceiptId String?
+  aiProvider       String?
+  parsedIntent     Json?
+  toolCallTrace    Json? // [{call, result}] — audit trail of tool-use rounds
+  plan             Json? // dry-run plan returned to user
+  executionResult  Json? // {expenseId?, groupId?, ...}
+  errorReason      String?
+  confirmedAt      DateTime?
+  executedAt       DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status])
 }

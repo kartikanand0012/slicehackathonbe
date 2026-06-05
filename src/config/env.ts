@@ -31,6 +31,21 @@ const EnvSchema = z.object({
   MAX_UPLOAD_MB: z.coerce.number().int().positive().max(50).default(10),
 
   AI_PROVIDER_PRIORITY: z.string().optional(),
+
+  // Anthropic direct
+  ANTHROPIC_API_KEY: z.string().optional(),
+  CLAUDE_RECEIPT_MODEL: z.string().optional(),
+  CLAUDE_INTENT_MODEL: z.string().optional(),
+
+  // AWS Bedrock (Claude on Bedrock). Standard AWS SDK env vars apply.
+  AWS_REGION: z.string().optional(),
+  AWS_ACCESS_KEY_ID: z.string().optional(),
+  AWS_SECRET_ACCESS_KEY: z.string().optional(),
+  AWS_SESSION_TOKEN: z.string().optional(),
+  BEDROCK_RECEIPT_MODEL_ID: z.string().optional(),
+  BEDROCK_INTENT_MODEL_ID: z.string().optional(),
+
+  // OpenAI (legacy)
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().optional(),
 });

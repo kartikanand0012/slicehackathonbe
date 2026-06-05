@@ -4,10 +4,11 @@ import { randomUUID } from "node:crypto";
 import { prisma } from "@/db/prisma";
 import { logger } from "@/lib/logger";
 import { BadRequestError, NotFoundError } from "@/lib/errors";
+import { sha256Hex } from "@/lib/sha256";
 import { getReceiptExtractor } from "@/ai/registry";
-import type { ExtractedReceipt } from "@/ai/types";
 import { env } from "@/config/env";
 import * as expensesService from "@/modules/expenses/expenses.service";
+import { sanitizeExtractedReceipt } from "./receipts.sanitizer";
 import type {
   ConvertReceiptBody,
   ListReceiptsQuery,
@@ -19,6 +20,9 @@ const RECEIPT_PUBLIC_SELECT = {
   groupId: true,
   status: true,
   aiProvider: true,
+  attemptCount: true,
+  isDuplicate: true,
+  duplicateOfId: true,
   errorReason: true,
   originalName: true,
   mimeType: true,
@@ -29,6 +33,9 @@ const RECEIPT_PUBLIC_SELECT = {
   taxPaise: true,
   tipPaise: true,
   totalPaise: true,
+  hint: true,
+  processingStartedAt: true,
+  processingFinishedAt: true,
   createdAt: true,
   updatedAt: true,
   items: {
@@ -39,10 +46,17 @@ const RECEIPT_PUBLIC_SELECT = {
       unitPaise: true,
       totalPaise: true,
       sortOrder: true,
+      tags: true,
     },
     orderBy: { sortOrder: "asc" as const },
   },
 } as const;
+
+const MAX_EXTRACTION_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = [500, 2000, 5000];
+
+/** Window inside which a hash match counts as a duplicate. */
+const DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 async function ensureUploadDir(): Promise<string> {
   const dir = path.resolve(env.UPLOAD_DIR);
@@ -50,45 +64,56 @@ async function ensureUploadDir(): Promise<string> {
   return dir;
 }
 
-function sanitizeExtracted(raw: unknown): ExtractedReceipt {
-  if (typeof raw !== "object" || raw === null) {
-    throw new BadRequestError("AI provider returned malformed extraction");
-  }
-  const r = raw as Record<string, unknown>;
-  const items = Array.isArray(r.items) ? r.items : [];
-  return {
-    merchantName: typeof r.merchantName === "string" ? r.merchantName : null,
-    occurredAt: typeof r.occurredAt === "string" ? r.occurredAt : null,
-    currency: "INR",
-    subtotalPaise:
-      typeof r.subtotalPaise === "number" ? Math.round(r.subtotalPaise) : null,
-    taxPaise: typeof r.taxPaise === "number" ? Math.round(r.taxPaise) : null,
-    tipPaise: typeof r.tipPaise === "number" ? Math.round(r.tipPaise) : null,
-    totalPaise:
-      typeof r.totalPaise === "number" ? Math.round(r.totalPaise) : 0,
-    items: items.map((it) => {
-      const i = it as Record<string, unknown>;
-      return {
-        name: String(i.name ?? ""),
-        quantity:
-          typeof i.quantity === "number" ? Math.max(1, Math.round(i.quantity)) : 1,
-        unitPaise:
-          typeof i.unitPaise === "number" ? Math.round(i.unitPaise) : 0,
-        totalPaise:
-          typeof i.totalPaise === "number" ? Math.round(i.totalPaise) : 0,
-      };
-    }),
-  };
-}
-
-export async function uploadAndExtract(input: {
+/**
+ * Step 1 — synchronous: dedup-check, persist the upload, return immediately
+ * with status PROCESSING. Caller polls `GET /receipts/:id`.
+ *
+ * Step 2 — background: `runExtraction(receiptId)` (kicked off via
+ * setImmediate so the HTTP response can flush first).
+ */
+export async function uploadReceipt(input: {
   userId: string;
   groupId?: string;
   hint?: string;
   file: { originalname: string; mimetype: string; size: number; buffer: Buffer };
-}) {
+}): Promise<{
+  receipt: Awaited<ReturnType<typeof readReceipt>>;
+  wasDuplicate: boolean;
+}> {
   if (!input.file.mimetype.startsWith("image/")) {
     throw new BadRequestError("Only image uploads are accepted");
+  }
+
+  const imageSha256 = sha256Hex(input.file.buffer);
+
+  // Dedup: if the same user uploaded the same bytes recently, return that
+  // existing receipt instead of re-running OCR.
+  const since = new Date(Date.now() - DEDUP_WINDOW_MS);
+  const existing = await prisma.receipt.findFirst({
+    where: {
+      uploadedById: input.userId,
+      imageSha256,
+      createdAt: { gte: since },
+      status: { in: ["PROCESSING", "COMPLETED"] },
+      isDuplicate: false,
+    },
+    select: { id: true },
+    orderBy: { createdAt: "desc" },
+  });
+
+  if (existing) {
+    await prisma.auditEvent.create({
+      data: {
+        actorId: input.userId,
+        groupId: input.groupId,
+        action: "RECEIPT_DUPLICATE",
+        entityId: existing.id,
+      },
+    });
+    return {
+      receipt: await readReceipt(existing.id),
+      wasDuplicate: true,
+    };
   }
 
   const dir = await ensureUploadDir();
@@ -102,12 +127,14 @@ export async function uploadAndExtract(input: {
       uploadedById: input.userId,
       groupId: input.groupId,
       imagePath,
+      imageSha256,
       originalName: input.file.originalname,
       mimeType: input.file.mimetype,
       fileSize: input.file.size,
-      status: "PROCESSING",
+      hint: input.hint,
+      status: "PENDING",
     },
-    select: RECEIPT_PUBLIC_SELECT,
+    select: { id: true },
   });
 
   await prisma.auditEvent.create({
@@ -119,69 +146,142 @@ export async function uploadAndExtract(input: {
     },
   });
 
-  const extractor = getReceiptExtractor();
-  try {
-    const { extracted, raw } = await extractor.extract({
-      imageBuffer: input.file.buffer,
-      mimeType: input.file.mimetype,
-      hint: input.hint,
-    });
-    const safe = sanitizeExtracted(extracted);
-
-    await prisma.$transaction(async (tx) => {
-      await tx.receipt.update({
-        where: { id: receipt.id },
-        data: {
-          status: "COMPLETED",
-          aiProvider: extractor.name,
-          merchantName: safe.merchantName,
-          occurredAt: safe.occurredAt ? new Date(safe.occurredAt) : undefined,
-          subtotalPaise: safe.subtotalPaise,
-          taxPaise: safe.taxPaise,
-          tipPaise: safe.tipPaise,
-          totalPaise: safe.totalPaise,
-          rawResponse: raw as never,
-        },
-      });
-      if (safe.items.length > 0) {
-        await tx.receiptItem.createMany({
-          data: safe.items.map((it, i) => ({
-            receiptId: receipt.id,
-            name: it.name,
-            quantity: it.quantity,
-            unitPaise: it.unitPaise,
-            totalPaise: it.totalPaise,
-            sortOrder: i,
-          })),
-        });
-      }
-      await tx.auditEvent.create({
-        data: {
-          actorId: input.userId,
-          groupId: input.groupId,
-          action: "RECEIPT_EXTRACTED",
-          entityId: receipt.id,
-          metadata: { provider: extractor.name },
-        },
-      });
-    });
-
-    return prisma.receipt.findUniqueOrThrow({
-      where: { id: receipt.id },
-      select: RECEIPT_PUBLIC_SELECT,
-    });
-  } catch (err) {
-    logger.error({ err, receiptId: receipt.id }, "Receipt extraction failed");
-    await prisma.receipt.update({
-      where: { id: receipt.id },
-      data: {
-        status: "FAILED",
-        aiProvider: extractor.name,
-        errorReason: (err as Error).message.slice(0, 500),
+  // Kick off extraction without blocking the HTTP response. The image buffer
+  // is captured by closure so we don't re-read from disk.
+  setImmediate(() => {
+    runExtraction(receipt.id, input.file.buffer, input.file.mimetype, input.hint).catch(
+      (err) => {
+        logger.error({ err, receiptId: receipt.id }, "Background extraction threw");
       },
-    });
-    throw err;
+    );
+  });
+
+  return {
+    receipt: await readReceipt(receipt.id),
+    wasDuplicate: false,
+  };
+}
+
+/**
+ * Background OCR runner. Retries transient failures with exponential backoff;
+ * persists a terminal FAILED status (with errorReason) on giving up.
+ */
+async function runExtraction(
+  receiptId: string,
+  imageBuffer: Buffer,
+  mimeType: string,
+  hint: string | undefined,
+): Promise<void> {
+  await prisma.receipt.update({
+    where: { id: receiptId },
+    data: { status: "PROCESSING", processingStartedAt: new Date() },
+  });
+
+  const extractor = getReceiptExtractor();
+
+  let lastError: Error | undefined;
+  for (let attempt = 1; attempt <= MAX_EXTRACTION_ATTEMPTS; attempt++) {
+    try {
+      const { extracted, raw } = await extractor.extract({
+        imageBuffer,
+        mimeType,
+        hint,
+      });
+      const { receipt: safe, warnings } = sanitizeExtractedReceipt(extracted);
+      if (warnings.length > 0) {
+        logger.warn({ receiptId, warnings }, "Receipt sanitization warnings");
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.receipt.update({
+          where: { id: receiptId },
+          data: {
+            status: "COMPLETED",
+            aiProvider: extractor.name,
+            attemptCount: attempt,
+            processingFinishedAt: new Date(),
+            merchantName: safe.merchantName,
+            occurredAt: safe.occurredAt ? new Date(safe.occurredAt) : undefined,
+            subtotalPaise: safe.subtotalPaise,
+            taxPaise: safe.taxPaise,
+            tipPaise: safe.tipPaise,
+            totalPaise: safe.totalPaise,
+            rawResponse: raw as never,
+          },
+        });
+        // Replace any items from previous failed attempts.
+        await tx.receiptItem.deleteMany({ where: { receiptId } });
+        if (safe.items.length > 0) {
+          await tx.receiptItem.createMany({
+            data: safe.items.map((it, i) => ({
+              receiptId,
+              name: it.name,
+              quantity: it.quantity,
+              unitPaise: it.unitPaise,
+              totalPaise: it.totalPaise,
+              sortOrder: i,
+              tags: it.tags ?? [],
+            })),
+          });
+        }
+        await tx.auditEvent.create({
+          data: {
+            action: "RECEIPT_EXTRACTED",
+            entityId: receiptId,
+            metadata: {
+              provider: extractor.name,
+              attempt,
+              warnings,
+            },
+          },
+        });
+      });
+      return;
+    } catch (err) {
+      lastError = err as Error;
+      logger.warn(
+        { err, receiptId, attempt },
+        "Receipt extraction attempt failed",
+      );
+      await prisma.receipt.update({
+        where: { id: receiptId },
+        data: { attemptCount: attempt },
+      });
+      if (attempt < MAX_EXTRACTION_ATTEMPTS) {
+        await prisma.auditEvent.create({
+          data: {
+            action: "RECEIPT_RETRIED",
+            entityId: receiptId,
+            metadata: { attempt, error: (err as Error).message.slice(0, 200) },
+          },
+        });
+        await sleep(RETRY_BACKOFF_MS[attempt - 1] ?? 5000);
+      }
+    }
   }
+
+  await prisma.receipt.update({
+    where: { id: receiptId },
+    data: {
+      status: "FAILED",
+      aiProvider: extractor.name,
+      processingFinishedAt: new Date(),
+      errorReason: lastError?.message.slice(0, 500) ?? "Unknown error",
+    },
+  });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+export async function readReceipt(receiptId: string) {
+  const r = await prisma.receipt.findUnique({
+    where: { id: receiptId },
+    select: RECEIPT_PUBLIC_SELECT,
+  });
+  if (!r) throw new NotFoundError("Receipt not found");
+  return r;
 }
 
 export async function getReceipt(userId: string, receiptId: string) {
@@ -190,9 +290,7 @@ export async function getReceipt(userId: string, receiptId: string) {
     select: { ...RECEIPT_PUBLIC_SELECT, uploadedById: true },
   });
   if (!r) throw new NotFoundError("Receipt not found");
-  if (r.uploadedById !== userId) {
-    throw new NotFoundError("Receipt not found"); // hide existence
-  }
+  if (r.uploadedById !== userId) throw new NotFoundError("Receipt not found");
   return r;
 }
 
@@ -238,7 +336,7 @@ export async function convertReceiptToExpense(
   }
   if (body.splitMode === "ITEM") {
     throw new BadRequestError(
-      "ITEM split is part of the guest-split flow; use EQUAL here or call /guest-splits",
+      "ITEM split is part of the guest-split flow; use EQUAL or call /commands for CONSTRAINT",
     );
   }
 
@@ -261,3 +359,6 @@ export async function convertReceiptToExpense(
 
   return expense;
 }
+
+// Re-exported for routes.
+export const uploadAndExtract = uploadReceipt;

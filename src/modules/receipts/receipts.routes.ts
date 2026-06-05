@@ -50,7 +50,7 @@ router.post(
   asyncHandler(async (req, res) => {
     if (!req.file) throw new BadRequestError("`image` form field is required");
     const body = ExtractReceiptBody.parse(req.body ?? {});
-    const receipt = await service.uploadAndExtract({
+    const { receipt, wasDuplicate } = await service.uploadAndExtract({
       userId: req.user!.id,
       groupId: body.groupId,
       hint: body.hint,
@@ -61,7 +61,7 @@ router.post(
         buffer: req.file.buffer,
       },
     });
-    res.status(201).json({ receipt });
+    res.status(wasDuplicate ? 200 : 202).json({ receipt, wasDuplicate });
   }),
 );
 

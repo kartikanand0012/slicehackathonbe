@@ -2,7 +2,7 @@
   "info": {
     "name": "SliceSplit Backend",
     "_postman_id": "a8f3e4d1-9b2c-4a7e-8f1d-3c2b1a9e8d7f",
-    "description": "INR-first expense-splitting backend for Slice Hackathon 2.\n\nBase URL is configured via the `{{base_url}}` env var (default `http://localhost:4000`).\n\n**Auth flow**\n1. Run `Auth > Register` or `Auth > Login` — the test script auto-stores `access_token` and `refresh_token` on the active environment.\n2. All subsequent authenticated requests pick up `{{access_token}}` via the Bearer auth.\n3. When the access token expires, run `Auth > Refresh` to rotate.\n\nFolder map mirrors `src/modules/`:\n- Health\n- Auth\n- Me\n- Groups (CRUD + members)\n- Expenses (per-group, CRUD with EQUAL/EXACT/PERCENTAGE/SHARES split)\n- Settlements (per-group)\n- Balances (per-group summary + UPI deep links)\n- Contacts (address book)\n- Receipts (AI extraction + convert to expense)\n- Guest Splits (Owner) + Guest Splits (Public — no auth, share-token scoped)\n",
+    "description": "INR-first expense-splitting backend for Slice Hackathon 2.\n\nBase URL is configured via the `{{base_url}}` env var (default `http://localhost:4000`).\n\n**Auth flow**\n1. Run `Auth > Register` or `Auth > Login` — the test script auto-stores `access_token` and `refresh_token` on the active environment.\n2. All subsequent authenticated requests pick up `{{access_token}}` via the Bearer auth.\n3. When the access token expires, run `Auth > Refresh` to rotate.\n\nFolder map mirrors `src/modules/`:\n- Health\n- Auth\n- Me\n- Groups (CRUD + members)\n- Expenses (per-group, CRUD with EQUAL/EXACT/PERCENTAGE/SHARES/CONSTRAINT split)\n- Settlements (per-group)\n- Balances (per-group summary + UPI deep links)\n- Contacts (address book)\n- Receipts (async AI OCR + convert to expense, SHA-256 dedup + retry)\n- Commands (NL voice + chat → tool-use → dry-run plan → confirm)\n- Guest Splits (Owner) + Guest Splits (Public — no auth, share-token scoped)\n",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -314,18 +314,22 @@
       ]
     },
     {
-      "name": "Receipts",
-      "description": "AI-powered receipt extraction. POST /extract is multipart/form-data — Postman handles this if you attach a real image to the `image` field.",
+      "name": "Receipts (async OCR)",
+      "description": "AI-powered receipt extraction.\n\n**Flow:**\n1. POST /extract — multipart upload. Returns 202 Accepted with status=PENDING|PROCESSING immediately. SHA-256 dedup: re-uploading the same image within 24h returns 200 with `wasDuplicate=true`.\n2. Poll GET /:id until status flips to COMPLETED or FAILED. Backend retries transient AI errors up to 3x with exponential backoff.\n3. POST /:id/convert — turn extracted items into an Expense. CONSTRAINT splits go through /commands instead.",
       "item": [
         {
           "name": "List my receipts",
           "request": { "method": "GET", "url": { "raw": "{{base_url}}{{api_prefix}}/receipts?limit=20", "host": ["{{base_url}}{{api_prefix}}"], "path": ["receipts"], "query": [{ "key": "limit", "value": "20" }, { "key": "groupId", "value": "{{group_id}}", "disabled": true }] } }
         },
         {
-          "name": "Upload + extract receipt",
+          "name": "Upload + extract receipt (async)",
           "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
-            "if (pm.response.code === 201) {",
-            "  pm.environment.set('receipt_id', pm.response.json().receipt.id);",
+            "if (pm.response.code === 202 || pm.response.code === 200) {",
+            "  const body = pm.response.json();",
+            "  pm.environment.set('receipt_id', body.receipt.id);",
+            "  pm.test('returns wasDuplicate flag', () => pm.expect(body).to.have.property('wasDuplicate'));",
+            "  pm.test('initial status is PENDING or PROCESSING or COMPLETED', () =>",
+            "    pm.expect(['PENDING','PROCESSING','COMPLETED']).to.include(body.receipt.status));",
             "}"
           ] } }],
           "request": {
@@ -343,7 +347,14 @@
           }
         },
         {
-          "name": "Get receipt",
+          "name": "Poll receipt status",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "if (pm.response.code === 200) {",
+            "  const r = pm.response.json().receipt;",
+            "  pm.test('receipt status reported', () => pm.expect(r.status).to.be.a('string'));",
+            "  console.log(`status=${r.status} attempts=${r.attemptCount}` + (r.errorReason ? ` err=${r.errorReason}` : ''));",
+            "}"
+          ] } }],
           "request": { "method": "GET", "url": { "raw": "{{base_url}}{{api_prefix}}/receipts/{{receipt_id}}", "host": ["{{base_url}}{{api_prefix}}"], "path": ["receipts", "{{receipt_id}}"] } }
         },
         {
@@ -354,6 +365,87 @@
             "body": { "mode": "raw", "raw": "{\n  \"title\": \"Cafe Bistro\",\n  \"paidById\": \"{{user_id}}\",\n  \"splitMode\": \"EQUAL\",\n  \"userIds\": [\"{{user_id}}\", \"REPLACE_WITH_USER_CUID\"]\n}" },
             "url": { "raw": "{{base_url}}{{api_prefix}}/receipts/{{receipt_id}}/convert", "host": ["{{base_url}}{{api_prefix}}"], "path": ["receipts", "{{receipt_id}}", "convert"] }
           }
+        }
+      ]
+    },
+    {
+      "name": "Commands (NL: voice + chat)",
+      "description": "Natural-language command pipeline (proposal §02 'core loop').\n\n**Two-stage flow** — by design rule, every money movement requires explicit confirmation:\n1. POST /commands — model parses the utterance using tool-use (resolve_mention, get_receipt_items, categorize_items, etc.). Returns `{ commandRunId, intent, plan }`.\n2. POST /commands/:id/confirm — executor turns the intent into real writes via existing services.\n3. POST /commands/:id/reject — close as REJECTED.\n\nProvider order is set by AI_PROVIDER_PRIORITY (default: bedrock, anthropic, openai, mock). The mock provider handles 'split this bill ... veg' and 'how much / balance' utterances offline so the demo never blocks.",
+      "item": [
+        {
+          "name": "Parse: dietary CONSTRAINT split (the showstopper)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "if (pm.response.code === 201) {",
+            "  pm.environment.set('command_run_id', pm.response.json().commandRun.id);",
+            "}"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"utterance\": \"split this bill between @kartik @sukant @mohit and make sure mohit is veg\",\n  \"source\": \"chat\",\n  \"contextGroupId\": \"{{group_id}}\",\n  \"contextReceiptId\": \"{{receipt_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/commands", "host": ["{{base_url}}{{api_prefix}}"], "path": ["commands"] }
+          }
+        },
+        {
+          "name": "Parse: create + populate group",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"utterance\": \"create a group Rameshwaram, add @sukant @mohit @kartik\",\n  \"source\": \"chat\"\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/commands", "host": ["{{base_url}}{{api_prefix}}"], "path": ["commands"] }
+          }
+        },
+        {
+          "name": "Parse: balance query",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"utterance\": \"how much does Mohit owe me overall?\",\n  \"source\": \"chat\",\n  \"contextGroupId\": \"{{group_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/commands", "host": ["{{base_url}}{{api_prefix}}"], "path": ["commands"] }
+          }
+        },
+        {
+          "name": "Parse: voice transcript (custom ratio)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"utterance\": \"split tonight's dinner 50-30-20 with @kartik @sukant @mohit\",\n  \"source\": \"voice\",\n  \"contextGroupId\": \"{{group_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/commands", "host": ["{{base_url}}{{api_prefix}}"], "path": ["commands"] }
+          }
+        },
+        {
+          "name": "Parse: settle query",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"utterance\": \"remind everyone who hasn't paid in {{group_id}}\",\n  \"source\": \"chat\"\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/commands", "host": ["{{base_url}}{{api_prefix}}"], "path": ["commands"] }
+          }
+        },
+        {
+          "name": "Parse: explain my split",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"utterance\": \"why do I owe ₹620?\",\n  \"source\": \"chat\",\n  \"contextGroupId\": \"{{group_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/commands", "host": ["{{base_url}}{{api_prefix}}"], "path": ["commands"] }
+          }
+        },
+        {
+          "name": "Get command run",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}{{api_prefix}}/commands/{{command_run_id}}", "host": ["{{base_url}}{{api_prefix}}"], "path": ["commands", "{{command_run_id}}"] } }
+        },
+        {
+          "name": "Confirm command",
+          "request": { "method": "POST", "url": { "raw": "{{base_url}}{{api_prefix}}/commands/{{command_run_id}}/confirm", "host": ["{{base_url}}{{api_prefix}}"], "path": ["commands", "{{command_run_id}}", "confirm"] } }
+        },
+        {
+          "name": "Reject command",
+          "request": { "method": "POST", "url": { "raw": "{{base_url}}{{api_prefix}}/commands/{{command_run_id}}/reject", "host": ["{{base_url}}{{api_prefix}}"], "path": ["commands", "{{command_run_id}}", "reject"] } }
+        },
+        {
+          "name": "List recent command runs",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}{{api_prefix}}/commands?limit=20", "host": ["{{base_url}}{{api_prefix}}"], "path": ["commands"], "query": [{ "key": "limit", "value": "20" }] } }
         }
       ]
     },

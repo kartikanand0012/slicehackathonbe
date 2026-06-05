@@ -11,7 +11,12 @@
 import { splitEqualPaise } from "./money";
 import { BadRequestError } from "./errors";
 
-export type SplitMode = "EQUAL" | "EXACT" | "PERCENTAGE" | "SHARES";
+export type SplitMode =
+  | "EQUAL"
+  | "EXACT"
+  | "PERCENTAGE"
+  | "SHARES"
+  | "CONSTRAINT";
 
 export type ShareDraft = {
   userId: string;
@@ -37,11 +42,29 @@ type SharesInput = {
   shares: { userId: string; shares: number }[];
 };
 
+/**
+ * Tag-based "dietary" split. Each item has tags; each participant has
+ * optional allow/deny tag lists. An item goes to every participant whose
+ * constraints permit it, split equally; sum is preserved with the same
+ * remainder-distribution trick used elsewhere.
+ *
+ * `commonItemsPaise` (tax, tips, service charge) is *not* tag-filtered —
+ * it's distributed proportionally over each participant's item subtotal.
+ */
+type ConstraintInput = {
+  mode: "CONSTRAINT";
+  totalPaise: number;
+  items: { name?: string; totalPaise: number; tags: string[] }[];
+  participants: { userId: string; allow?: string[]; deny?: string[] }[];
+  commonItemsPaise?: number;
+};
+
 export type SplitInput =
   | EqualInput
   | ExactInput
   | PercentageInput
-  | SharesInput;
+  | SharesInput
+  | ConstraintInput;
 
 export function calculateShares(input: SplitInput): ShareDraft[] {
   if (input.totalPaise <= 0 || !Number.isInteger(input.totalPaise)) {
@@ -57,6 +80,8 @@ export function calculateShares(input: SplitInput): ShareDraft[] {
       return splitPercentage(input.totalPaise, input.shares);
     case "SHARES":
       return splitShares(input.totalPaise, input.shares);
+    case "CONSTRAINT":
+      return splitConstraint(input);
   }
 }
 
@@ -157,6 +182,116 @@ function splitPercentage(
     };
   });
 }
+
+/**
+ * Constraint (dietary/category) split.
+ *
+ * Algorithm:
+ *  1. For each item, decide which participants are *eligible* (tags satisfy
+ *     allow if present; never violate deny). Split the item's paise equally
+ *     across eligible participants; distribute the remainder to leading
+ *     userIds (sorted) so the sum stays exact.
+ *  2. Each participant's "subtotal" is the sum of item slices they got.
+ *  3. Distribute `commonItemsPaise` (tax + tips + service) proportionally
+ *     over subtotals; remainder absorbed by leading userIds.
+ *  4. Validate the totals match what the caller asked for.
+ */
+function splitConstraint(input: ConstraintInput): ShareDraft[] {
+  if (input.participants.length === 0) {
+    throw new BadRequestError("CONSTRAINT split needs at least one participant");
+  }
+  const sortedParticipants = [...input.participants].sort((a, b) =>
+    a.userId.localeCompare(b.userId),
+  );
+  const ids = sortedParticipants.map((p) => p.userId);
+  if (new Set(ids).size !== ids.length) {
+    throw new BadRequestError("CONSTRAINT participants must be unique");
+  }
+
+  const eligible = (
+    p: { allow?: string[]; deny?: string[] },
+    itemTags: string[],
+  ): boolean => {
+    if (p.deny && p.deny.some((t) => itemTags.includes(t))) return false;
+    if (!p.allow || p.allow.length === 0) return true;
+    return p.allow.some((t) => itemTags.includes(t));
+  };
+
+  const subtotals = new Map<string, number>();
+  for (const id of ids) subtotals.set(id, 0);
+  let itemSum = 0;
+
+  for (const item of input.items) {
+    if (!Number.isInteger(item.totalPaise) || item.totalPaise < 0) {
+      throw new BadRequestError(
+        `Item ${item.name ?? "?"} totalPaise must be a non-negative integer`,
+      );
+    }
+    const consumers = sortedParticipants.filter((p) => eligible(p, item.tags));
+    if (consumers.length === 0) {
+      throw new BadRequestError(
+        `Item ${item.name ?? "?"} has tags [${item.tags.join(",")}] but no participant is eligible`,
+      );
+    }
+    const chunks = splitProportionalPaise(
+      item.totalPaise,
+      consumers.map(() => 1),
+    );
+    consumers.forEach((p, i) => {
+      subtotals.set(p.userId, (subtotals.get(p.userId) ?? 0) + chunks[i]!);
+    });
+    itemSum += item.totalPaise;
+  }
+
+  const common = input.commonItemsPaise ?? 0;
+  if (common < 0 || !Number.isInteger(common)) {
+    throw new BadRequestError("commonItemsPaise must be a non-negative integer");
+  }
+  if (itemSum + common !== input.totalPaise) {
+    throw new BadRequestError(
+      `CONSTRAINT split inconsistent: items sum (${itemSum}) + common (${common}) != totalPaise (${input.totalPaise})`,
+    );
+  }
+
+  // Distribute common charges over per-person subtotals. If subtotals sum
+  // to zero (degenerate — no items), split common equally.
+  const subtotalArr = ids.map((id) => subtotals.get(id) ?? 0);
+  const subtotalSum = subtotalArr.reduce((s, n) => s + n, 0);
+  let commonChunks: number[];
+  if (common === 0) {
+    commonChunks = ids.map(() => 0);
+  } else if (subtotalSum === 0) {
+    commonChunks = splitProportionalPaise(common, ids.map(() => 1));
+  } else {
+    commonChunks = splitProportionalPaise(common, subtotalArr);
+  }
+
+  return ids.map((userId, i) => ({
+    userId,
+    amountPaise: subtotalArr[i]! + commonChunks[i]!,
+    shares: 1,
+    basisPoints: null,
+  }));
+}
+
+/**
+ * Split `totalPaise` proportionally by `weights`. sum(parts) === total even
+ * when the proportion doesn't divide cleanly. Remainder is absorbed by the
+ * leading indices.
+ */
+function splitProportionalPaise(totalPaise: number, weights: number[]): number[] {
+  const sum = weights.reduce((s, w) => s + w, 0);
+  if (sum === 0) return weights.map(() => 0);
+  const raw = weights.map((w) => Math.floor((totalPaise * w) / sum));
+  let remainder = totalPaise - raw.reduce((a, b) => a + b, 0);
+  return raw.map((r) => {
+    const add = remainder > 0 ? 1 : 0;
+    if (remainder > 0) remainder--;
+    return r + add;
+  });
+}
+
+export const __test__ = { splitProportionalPaise };
 
 function splitShares(
   totalPaise: number,

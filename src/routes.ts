@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { authRouter } from "@/modules/auth/auth.routes";
 import { balancesRouter } from "@/modules/balances/balances.routes";
+import { commandsRouter } from "@/modules/commands/commands.routes";
 import { contactsRouter } from "@/modules/contacts/contacts.routes";
 import { expensesRouter } from "@/modules/expenses/expenses.routes";
 import { groupsRouter } from "@/modules/groups/groups.routes";
@@ -26,6 +27,7 @@ apiRouter.use("/groups/:groupId/balances", balancesRouter);
 
 apiRouter.use("/contacts", contactsRouter);
 apiRouter.use("/receipts", receiptsRouter);
+apiRouter.use("/commands", commandsRouter);
 
 apiRouter.use("/guest-splits", ownedGuestSplitsRouter);
 apiRouter.use("/g", publicGuestSplitsRouter); // short prefix for share URLs

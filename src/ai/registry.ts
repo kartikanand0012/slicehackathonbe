@@ -1,25 +1,27 @@
-import { logger } from "@/lib/logger";
-import type { ReceiptExtractor } from "./types";
-import { MockReceiptExtractor } from "./providers/mock";
-import { OpenAiReceiptExtractor } from "./providers/openai";
-
 /**
- * Provider registry.
- *
- * Selection rules:
- *   1. Build a list of all known providers in declared preference order.
- *   2. Honour `AI_PROVIDER_PRIORITY` if set (comma-separated names).
- *   3. The first provider that returns `true` from `isConfigured()` wins.
- *
- * `mock` is always at the tail so dev / tests always have a working provider.
+ * AI provider registry. Two capabilities are independent — a provider can
+ * implement either or both. Both selectors walk the same `AI_PROVIDER_PRIORITY`
+ * list; mock is appended as a guaranteed fallback.
  */
 
-const ALL_PROVIDERS: Record<string, () => ReceiptExtractor> = {
+import { logger } from "@/lib/logger";
+import type { IntentParser, ReceiptExtractor } from "./types";
+import { AnthropicProvider } from "./providers/anthropic";
+import { BedrockProvider } from "./providers/bedrock";
+import { MockProvider } from "./providers/mock";
+import { OpenAiReceiptExtractor } from "./providers/openai";
+
+type AnyProvider = ReceiptExtractor | IntentParser;
+
+const ALL_PROVIDERS: Record<string, () => AnyProvider> = {
+  bedrock: () => new BedrockProvider(),
+  anthropic: () => new AnthropicProvider(),
   openai: () => new OpenAiReceiptExtractor(),
-  mock: () => new MockReceiptExtractor(),
+  mock: () => new MockProvider(),
 };
 
-let cached: ReceiptExtractor | null = null;
+let receiptCache: ReceiptExtractor | null = null;
+let intentCache: IntentParser | null = null;
 
 export function listProviderNames(): string[] {
   return Object.keys(ALL_PROVIDERS);
@@ -27,32 +29,59 @@ export function listProviderNames(): string[] {
 
 function preferenceOrder(): string[] {
   const env = process.env.AI_PROVIDER_PRIORITY;
-  if (!env) return ["openai", "mock"];
+  // Default reflects the proposal: Bedrock first, then direct Anthropic,
+  // then OpenAI (legacy), then mock.
+  const fallback = ["bedrock", "anthropic", "openai", "mock"];
+  if (!env) return fallback;
   return env
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter((s) => s in ALL_PROVIDERS)
-    .concat("mock"); // mock is always reachable as last-resort
+    .concat("mock");
+}
+
+function isReceiptExtractor(p: AnyProvider): p is ReceiptExtractor {
+  return typeof (p as ReceiptExtractor).extract === "function";
+}
+
+function isIntentParser(p: AnyProvider): p is IntentParser {
+  return typeof (p as IntentParser).parseIntent === "function";
 }
 
 export function getReceiptExtractor(): ReceiptExtractor {
-  if (cached) return cached;
+  if (receiptCache) return receiptCache;
   for (const name of preferenceOrder()) {
     const factory = ALL_PROVIDERS[name];
     if (!factory) continue;
     const p = factory();
-    if (p.isConfigured()) {
+    if (isReceiptExtractor(p) && p.isConfigured()) {
       logger.info({ provider: p.name }, "AI receipt extractor selected");
-      cached = p;
+      receiptCache = p;
       return p;
     }
   }
-  // Unreachable: mock is always configured. But keep a sane fallback.
-  cached = new MockReceiptExtractor();
-  return cached;
+  receiptCache = new MockProvider();
+  return receiptCache;
 }
 
-/** Test hook — drop the cached provider so the next call re-picks. */
+export function getIntentParser(): IntentParser {
+  if (intentCache) return intentCache;
+  for (const name of preferenceOrder()) {
+    const factory = ALL_PROVIDERS[name];
+    if (!factory) continue;
+    const p = factory();
+    if (isIntentParser(p) && p.isConfigured()) {
+      logger.info({ provider: p.name }, "AI intent parser selected");
+      intentCache = p;
+      return p;
+    }
+  }
+  intentCache = new MockProvider();
+  return intentCache;
+}
+
+/** Test hook — drop both caches so the next call re-picks. */
 export function resetReceiptExtractorCache(): void {
-  cached = null;
+  receiptCache = null;
+  intentCache = null;
 }

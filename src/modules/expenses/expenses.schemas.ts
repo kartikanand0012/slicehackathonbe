@@ -29,6 +29,31 @@ const ShareUnits = z.object({
     .max(50),
 });
 
+const ConstraintShares = z.object({
+  mode: z.literal("CONSTRAINT"),
+  items: z
+    .array(
+      z.object({
+        name: z.string().max(120).optional(),
+        totalPaise: z.number().int().nonnegative(),
+        tags: z.array(z.string().max(40)).default([]),
+      }),
+    )
+    .min(1)
+    .max(200),
+  participants: z
+    .array(
+      z.object({
+        userId: Cuid,
+        allow: z.array(z.string().max(40)).optional(),
+        deny: z.array(z.string().max(40)).optional(),
+      }),
+    )
+    .min(1)
+    .max(50),
+  commonItemsPaise: z.number().int().nonnegative().optional(),
+});
+
 export const CreateExpenseBody = z
   .object({
     title: z.string().min(1).max(120).trim(),
@@ -42,6 +67,7 @@ export const CreateExpenseBody = z
       ExactShares,
       PercentShares,
       ShareUnits,
+      ConstraintShares,
     ]),
   })
   .strict();
@@ -61,6 +87,7 @@ export const UpdateExpenseBody = z
         ExactShares,
         PercentShares,
         ShareUnits,
+        ConstraintShares,
       ])
       .optional(),
   })

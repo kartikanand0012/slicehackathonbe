@@ -1,0 +1,243 @@
+// SliceSplit — INR-only expense splitting backend
+// All monetary amounts are stored as Int paise (1 INR = 100 paise).
+// No multi-currency. No Venmo. No placeholder users (we use Contacts instead).
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── USERS ─────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  phone        String?  @unique
+  name         String
+  passwordHash String
+  avatarUrl    String?
+  upiHandle    String?  // for future settle-up via UPI deep link
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  memberships     GroupMember[]
+  expensesPaid    Expense[]      @relation("ExpensePaidBy")
+  expensesCreated Expense[]      @relation("ExpenseCreatedBy")
+  expenseShares   ExpenseShare[]
+  settlementsOut  Settlement[]   @relation("SettlementFrom")
+  settlementsIn   Settlement[]   @relation("SettlementTo")
+  contactsOwned   Contact[]      @relation("ContactOwner")
+  contactLinked   Contact[]      @relation("ContactLinkedUser")
+  refreshTokens   RefreshToken[]
+  auditEvents     AuditEvent[]
+
+  @@index([phone])
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ─── CONTACTS ──────────────────────────────────────────────
+// Replaces ShareTab's "placeholder users" pattern. A Contact is something
+// a user keeps in their address book — it may or may not be linked to a
+// real platform User. Splits can reference Contacts directly for off-platform
+// people; once they sign up, the Contact gets linkedUserId set.
+
+model Contact {
+  id           String   @id @default(cuid())
+  ownerId      String   // the user who added this contact
+  displayName  String
+  phone        String?
+  email        String?
+  linkedUserId String?  // set when this contact matches a real platform User
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  owner      User  @relation("ContactOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  linkedUser User? @relation("ContactLinkedUser", fields: [linkedUserId], references: [id], onDelete: SetNull)
+
+  @@unique([ownerId, phone])
+  @@unique([ownerId, email])
+  @@index([ownerId])
+  @@index([linkedUserId])
+}
+
+// ─── GROUPS ────────────────────────────────────────────────
+
+model Group {
+  id            String    @id @default(cuid())
+  name          String
+  emoji         String?   @default("💸")
+  description   String?
+  simplifyDebts Boolean   @default(true)
+  archivedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  members     GroupMember[]
+  expenses    Expense[]
+  settlements Settlement[]
+  invites     GroupInvite[]
+  auditEvents AuditEvent[]
+}
+
+enum GroupRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+model GroupMember {
+  id       String    @id @default(cuid())
+  userId   String
+  groupId  String
+  role     GroupRole @default(MEMBER)
+  joinedAt DateTime  @default(now())
+  leftAt   DateTime?
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, groupId])
+  @@index([groupId])
+}
+
+model GroupInvite {
+  id        String    @id @default(cuid())
+  groupId   String
+  token     String    @unique @default(cuid())
+  invitedBy String
+  expiresAt DateTime
+  usedAt    DateTime?
+  usedById  String?
+  createdAt DateTime  @default(now())
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([groupId])
+}
+
+// ─── EXPENSES ──────────────────────────────────────────────
+// All amounts are paise (Int). 1 INR = 100 paise.
+
+enum SplitMode {
+  EQUAL
+  EXACT
+  PERCENTAGE
+  SHARES
+  ITEM // reserved for receipt-driven splits (PR 2)
+}
+
+model Expense {
+  id          String    @id @default(cuid())
+  groupId     String
+  title       String
+  notes       String?
+  amountPaise Int       // total amount in paise
+  category    String?
+  occurredAt  DateTime  @default(now())
+  splitMode   SplitMode @default(EQUAL)
+  paidById    String
+  createdById String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime? // soft delete to preserve audit trail
+
+  group     Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  paidBy    User           @relation("ExpensePaidBy", fields: [paidById], references: [id])
+  createdBy User           @relation("ExpenseCreatedBy", fields: [createdById], references: [id])
+  shares    ExpenseShare[]
+
+  @@index([groupId, occurredAt(sort: Desc)])
+  @@index([paidById])
+}
+
+model ExpenseShare {
+  id           String @id @default(cuid())
+  expenseId    String
+  userId       String
+  amountPaise  Int    // this user's share in paise (always the final settled value)
+  shares       Int    @default(1)     // raw share units, used in SHARES mode
+  basisPoints  Int?   // 1/100 of a percent, used in PERCENTAGE mode (5000 = 50.00%)
+
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([expenseId, userId])
+  @@index([userId])
+}
+
+// ─── SETTLEMENTS ───────────────────────────────────────────
+
+model Settlement {
+  id          String   @id @default(cuid())
+  groupId     String
+  fromId      String
+  toId        String
+  amountPaise Int
+  method      String?  // e.g. "UPI", "CASH"; freeform for PR 1
+  note        String?
+  settledAt   DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  from  User  @relation("SettlementFrom", fields: [fromId], references: [id])
+  to    User  @relation("SettlementTo", fields: [toId], references: [id])
+
+  @@index([groupId, settledAt(sort: Desc)])
+  @@index([fromId])
+  @@index([toId])
+}
+
+// ─── AUDIT ────────────────────────────────────────────────
+// Lightweight audit trail. Not an admin dashboard — just an append-only
+// log of significant events for debugging and compliance.
+
+enum AuditAction {
+  USER_REGISTERED
+  USER_LOGIN
+  GROUP_CREATED
+  GROUP_UPDATED
+  GROUP_ARCHIVED
+  MEMBER_ADDED
+  MEMBER_REMOVED
+  EXPENSE_CREATED
+  EXPENSE_UPDATED
+  EXPENSE_DELETED
+  SETTLEMENT_CREATED
+  INVITE_CREATED
+  INVITE_REDEEMED
+}
+
+model AuditEvent {
+  id        String      @id @default(cuid())
+  actorId   String?
+  groupId   String?
+  action    AuditAction
+  entityId  String?     // polymorphic reference
+  metadata  Json?
+  createdAt DateTime    @default(now())
+
+  actor User?  @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  group Group? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+
+  @@index([actorId, createdAt])
+  @@index([groupId, createdAt])
+  @@index([action, createdAt])
+}

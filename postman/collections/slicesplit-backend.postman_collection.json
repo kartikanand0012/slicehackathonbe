@@ -1,0 +1,361 @@
+{
+  "info": {
+    "name": "SliceSplit Backend",
+    "_postman_id": "a8f3e4d1-9b2c-4a7e-8f1d-3c2b1a9e8d7f",
+    "description": "INR-first expense-splitting backend for Slice Hackathon 2.\n\nBase URL is configured via the `{{base_url}}` env var (default `http://localhost:4000`).\n\n**Auth flow**\n1. Run `Auth > Register` or `Auth > Login` — the test script auto-stores `access_token` and `refresh_token` on the active environment.\n2. All subsequent authenticated requests pick up `{{access_token}}` via the Bearer auth.\n3. When the access token expires, run `Auth > Refresh` to rotate.\n\nFolder map mirrors `src/modules/`:\n- Health\n- Auth\n- Me\n- Groups (CRUD + members)\n",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:4000", "type": "string" },
+    { "key": "api_prefix", "value": "/api/v1", "type": "string" }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Ensure env has the variables we need; defaults are set on the collection."
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "description": "Liveness and readiness probes. No auth.",
+      "item": [
+        {
+          "name": "Liveness",
+          "request": {
+            "method": "GET",
+            "auth": { "type": "noauth" },
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/health/live",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["health", "live"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Readiness (checks DB)",
+          "request": {
+            "method": "GET",
+            "auth": { "type": "noauth" },
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/health/ready",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["health", "ready"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "description": "Register, login, refresh, logout. Login + Register auto-set {{access_token}} and {{refresh_token}}.",
+      "item": [
+        {
+          "name": "Register",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  pm.environment.set('access_token', body.accessToken);",
+                  "  pm.environment.set('refresh_token', body.refreshToken);",
+                  "  pm.environment.set('user_id', body.user.id);",
+                  "  pm.test('access token returned', () => pm.expect(body.accessToken).to.be.a('string'));",
+                  "} else {",
+                  "  pm.test('register success', () => pm.expect(pm.response.code).to.eql(201));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "auth": { "type": "noauth" },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"alice@example.com\",\n  \"name\": \"Alice\",\n  \"password\": \"sup3rs3cret\",\n  \"phone\": \"+919876543210\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/auth/register",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["auth", "register"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  pm.environment.set('access_token', body.accessToken);",
+                  "  pm.environment.set('refresh_token', body.refreshToken);",
+                  "  pm.environment.set('user_id', body.user.id);",
+                  "  pm.test('access token returned', () => pm.expect(body.accessToken).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "auth": { "type": "noauth" },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"alice@example.com\",\n  \"password\": \"sup3rs3cret\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/auth/login",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["auth", "login"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Refresh",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  pm.environment.set('access_token', body.accessToken);",
+                  "  pm.environment.set('refresh_token', body.refreshToken);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "auth": { "type": "noauth" },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refresh_token}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/auth/refresh",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["auth", "refresh"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "auth": { "type": "noauth" },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refresh_token}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/auth/logout",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["auth", "logout"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Me",
+      "description": "Profile endpoints. Requires Bearer auth.",
+      "item": [
+        {
+          "name": "Get my profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/me",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["me"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update profile",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Alice K.\",\n  \"upiHandle\": \"alice@okhdfc\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/me",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["me"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Groups",
+      "description": "Group CRUD + member management. Owner / Admin checks enforced server-side.",
+      "item": [
+        {
+          "name": "List my groups",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/groups?limit=20",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["groups"],
+              "query": [
+                { "key": "limit", "value": "20" },
+                { "key": "archived", "value": "false", "disabled": true },
+                { "key": "cursor", "value": "", "disabled": true }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create group",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  pm.environment.set('group_id', body.group.id);",
+                  "  pm.test('group id stored', () => pm.expect(body.group.id).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Goa Trip\",\n  \"emoji\": \"🏖️\",\n  \"description\": \"Dec 2025 plan\",\n  \"simplifyDebts\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/groups",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["groups"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get group by id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/groups/{{group_id}}",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["groups", "{{group_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update group",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Goa Trip — final\",\n  \"description\": \"Locked-in itinerary\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/groups/{{group_id}}",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["groups", "{{group_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Archive group",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"archived\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/groups/{{group_id}}",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["groups", "{{group_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Add member",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"REPLACE_WITH_USER_CUID\",\n  \"role\": \"MEMBER\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/groups/{{group_id}}/members",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["groups", "{{group_id}}", "members"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Remove member",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}{{api_prefix}}/groups/{{group_id}}/members/REPLACE_WITH_USER_CUID",
+              "host": ["{{base_url}}{{api_prefix}}"],
+              "path": ["groups", "{{group_id}}", "members", "REPLACE_WITH_USER_CUID"]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

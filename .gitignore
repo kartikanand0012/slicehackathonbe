@@ -15,3 +15,6 @@ src/generated
 # Newman test artefacts
 tests/e2e/reports/
 tests/e2e/slicesplit-backend.e2e.postman_collection.json
+
+# Runtime upload directory — receipt images written here at upload time
+uploads/

@@ -288,6 +288,7 @@ slicesplit-backend/
 | PR 1 — backend foundation | ✅ shipped | TS+Express+Prisma+JWT, balance engine ported with 25 tests, Docker single-click, Postman collection |
 | PR 2 — domain features + AI + guest splits | ✅ shipped | expense/settlement/balance routes, contacts, UPI deep-links, AI provider registry + receipt pipeline, guest-split state machine |
 | PR 3 — Claude/Bedrock + NL command layer + tools + OCR hardening | ✅ shipped | Anthropic + Bedrock providers behind a common interface, AI-tools layer ("skills"), implicit-constraint NL command pipeline, CONSTRAINT split mode, async receipt OCR with SHA-256 dedup + retry/backoff + sanitization, 58 tests |
+| PR 3.5 — e2e test harness (Newman) | ✅ shipped | Self-bootstrapping Postman suite over Docker compose; 57 reqs / 25 assertions / 0 failures; **caught 3 production bugs** before they could ship |
 
 ---
 
@@ -545,3 +546,59 @@ Cumulative: **58 / 58 tests pass**.
 | §08 Scalability | PR 3 (partial) | Async + retry + dedup; queue-based fanout is a PR 4 nice-to-have |
 | §09 Edge cases | PR 3 (most) | Dedup, low-confidence handling via sanitizer warnings, mid-trip member rules handled by `leftAt` |
 | §12 Compliance & security | — | PR 4 (you put PII redaction on hold; rest stays) |
+
+---
+
+## 13. PR 3.5 — e2e test harness (Newman over docker compose)
+
+The 58 vitest cases prove the pure libs (money, balance engine, split calculator, etc.) work. They prove **none** of the route → service → Prisma → response wiring. PR 3.5 closes that gap with a Newman-driven end-to-end suite that boots a real backend in Docker and hits every endpoint with realistic data.
+
+### 13A. Harness layout — `tests/e2e/`
+
+| File | Purpose |
+| --- | --- |
+| `build-collection.mjs` | Rewrites the canonical Postman collection into an e2e-ready variant. Prepends a "0. Setup" folder that registers three timestamped users (`alice-<runId>@e2e.local` etc.) and saves `user_a_id` / `user_b_id` / `user_c_id`. Resolves every `REPLACE_WITH_USER_CUID` placeholder. Wires `fixtures/receipt.png` into the multipart upload. Layers extra `pm.test(...)` assertions on demo-critical requests. |
+| `environment.json` | Newman env with all variable slots; left empty so Setup populates them. |
+| `fixtures/receipt.png` | A tiny valid 100×100 PNG so the multipart upload + async OCR pipeline are actually exercised. Mock provider doesn't care about content. |
+| `run.sh` | Driver: ephemeral `JWT_SECRET`, pins `AI_PROVIDER_PRIORITY=mock` for determinism, bumps `AUTH_RATE_LIMIT_MAX`, brings docker compose up, waits for `/api/v1/health/ready`, runs Newman, tears the stack down. Variants: `NEWMAN_KEEP_RUNNING=1` and `--no-boot`. |
+| `README.md` | Usage notes, CI guidance, how to switch to real Bedrock / Anthropic. |
+
+### 13B. npm scripts
+
+```bash
+npm run test:e2e                    # full cycle: boot → newman → teardown
+npm run test:e2e:no-boot            # against an already-running server
+npm run test:e2e:build-collection   # rebuild the e2e collection only
+```
+
+`newman` + `newman-reporter-htmlextra` are devDependencies. HTML + JSON reports in `tests/e2e/reports/` (gitignored).
+
+### 13C. First green run
+
+| Metric | Result |
+| --- | --- |
+| Requests | **57** |
+| Assertions | **25** |
+| Failures | **0** |
+| Wall time | ~17 s |
+
+Coverage: auth (register × 3, login, refresh, logout, /me), groups CRUD, all four split modes (with sum-to-total assertions), settlements, balances (with net-to-zero assertion), contacts, async OCR pipeline end-to-end (upload → poll → COMPLETED → convert), every command-pattern utterance from §03, owner + public guest-splits.
+
+### 13D. Three real bugs Newman caught
+
+| # | Symptom | Root cause | Fix |
+| --- | --- | --- | --- |
+| 1 | `docker compose up` failed with `yaml: mapping values are not allowed in this context` | Colon inside `${JWT_SECRET:?... openssl rand -base64 48}` parsed as a YAML mapping separator. | Quoted the value. Anyone cloning fresh would have hit this. |
+| 2 | Container booted, API crashed on first DB query with `PrismaClientInitializationError: linux-musl-arm64-openssl-3.0.x` not found | Prisma client built for `openssl-1.1.x`, Alpine 3.x ships OpenSSL 3.x. | Added `binaryTargets = ["native", "linux-musl-arm64-openssl-3.0.x", "linux-musl-openssl-3.0.x"]` to the generator block. Vitest didn't catch this because tests stub Prisma. |
+| 3 | Container looked healthy; `curl localhost:4000/...` → `Connection reset by peer`. Logs said `port: 5432`. `ss -tlnp` confirmed Node was bound to 5432. | `docker/entrypoint.sh` reused `$PORT` as a local while parsing Postgres host/port from `DATABASE_URL`. The value (5432) leaked into Node's env via `exec`, overriding the configured listen port. | Renamed locals to `$PG_HOST` / `$PG_PORT`. Vitest didn't catch this because tests don't go through the entrypoint script. |
+
+All three are in script / config / build land — exactly the kind of bug pure-function tests can't see.
+
+### 13E. What the harness does NOT cover (yet)
+
+- Real Claude / Bedrock calls (pinned to mock for determinism; opt-in via env vars)
+- Parallel-upload race conditions on SHA-256 dedup
+- Refresh-token rotation revocation under attack
+- Per-route rate-limit triggering (bypassed for the suite)
+
+All PR 4 / PR 5 candidates.

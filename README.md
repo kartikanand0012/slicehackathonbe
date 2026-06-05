@@ -105,7 +105,31 @@ docker compose -f docker/docker-compose.yml up --build
 | POST   | `/api/v1/commands/:id/confirm`              | ✓    |
 | POST   | `/api/v1/commands/:id/reject`               | ✓    |
 
-## Tests
+## Testing
+
+Two layers:
+
+### Unit (vitest, ~600 ms)
+
+```bash
+npm test
+```
+
+Covers pure libs: `money`, `balance-engine`, `split-calculator`, `upi`, `ai/registry`, `guest/service` math. 58 tests today.
+
+### End-to-end (Newman over docker compose, ~17 s)
+
+```bash
+npm run test:e2e                    # boot Docker → newman → teardown
+npm run test:e2e:no-boot            # against an already-running server
+NEWMAN_KEEP_RUNNING=1 npm run test:e2e   # leave the stack up after
+```
+
+Self-bootstrapping suite: registers three timestamped users, exercises every module the API exposes (auth, groups, expenses in all 4 modes, settlements, balances, contacts, async OCR receipts, NL commands, guest splits). Pins `AI_PROVIDER_PRIORITY=mock` for determinism. See `tests/e2e/README.md` for the real-AI override.
+
+First run was 57 requests / 25 assertions / 0 failures — **and caught 3 real bugs** (a broken `docker-compose.yml`, a Prisma engine-target mismatch, and a `PORT` env-var collision in `entrypoint.sh`) that pure-function tests can't see.
+
+## Tests (legacy header, kept for backlinks)
 
 ```bash
 npm test              # vitest run

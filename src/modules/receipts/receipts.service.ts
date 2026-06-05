@@ -319,8 +319,14 @@ export async function convertReceiptToExpense(
       uploadedById: true,
       groupId: true,
       totalPaise: true,
+      subtotalPaise: true,
+      taxPaise: true,
+      tipPaise: true,
       status: true,
-      items: true,
+      items: {
+        select: { name: true, totalPaise: true, tags: true },
+        orderBy: { sortOrder: "asc" },
+      },
     },
   });
   if (!r || r.uploadedById !== userId) {
@@ -334,17 +340,43 @@ export async function convertReceiptToExpense(
   if (r.status !== "COMPLETED" || !r.totalPaise) {
     throw new BadRequestError("Receipt has not been extracted yet");
   }
-  if (body.splitMode === "ITEM") {
-    throw new BadRequestError(
-      "ITEM split is part of the guest-split flow; use EQUAL or call /commands for CONSTRAINT",
-    );
+
+  let split;
+  if (body.splitMode === "EQUAL") {
+    split = { mode: "EQUAL" as const, userIds: body.userIds! };
+  } else {
+    // CONSTRAINT — wire the receipt's tagged items + tax/tip directly into
+    // the split engine. The common portion is everything in the total that
+    // isn't covered by item totals (typically tax + tip + service).
+    if (r.items.length === 0) {
+      throw new BadRequestError(
+        "Cannot do CONSTRAINT split on a receipt with no extracted items — use EQUAL or re-extract",
+      );
+    }
+    const itemSum = r.items.reduce((s, it) => s + it.totalPaise, 0);
+    const commonItemsPaise = r.totalPaise - itemSum;
+    if (commonItemsPaise < 0) {
+      throw new BadRequestError(
+        `Receipt is inconsistent: item sum (${itemSum}) exceeds total (${r.totalPaise})`,
+      );
+    }
+    split = {
+      mode: "CONSTRAINT" as const,
+      items: r.items.map((it) => ({
+        name: it.name,
+        totalPaise: it.totalPaise,
+        tags: it.tags ?? [],
+      })),
+      participants: body.participants!,
+      commonItemsPaise,
+    };
   }
 
   const expense = await expensesService.createExpense(userId, r.groupId, {
     title: body.title,
     amountPaise: r.totalPaise,
     paidById: body.paidById,
-    split: { mode: "EQUAL", userIds: body.userIds! },
+    split,
   });
 
   await prisma.auditEvent.create({
@@ -353,7 +385,7 @@ export async function convertReceiptToExpense(
       groupId: r.groupId,
       action: "RECEIPT_CONVERTED",
       entityId: r.id,
-      metadata: { expenseId: expense.id },
+      metadata: { expenseId: expense.id, splitMode: body.splitMode },
     },
   });
 

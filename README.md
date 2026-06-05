@@ -104,6 +104,10 @@ docker compose -f docker/docker-compose.yml up --build
 | GET    | `/api/v1/commands/:id`                      | ✓    |
 | POST   | `/api/v1/commands/:id/confirm`              | ✓    |
 | POST   | `/api/v1/commands/:id/reject`               | ✓    |
+| GET    | `/api/v1/expenses/:expenseId/disputes`      | ✓    |
+| POST   | `/api/v1/expenses/:expenseId/disputes`      | ✓    |
+| POST   | `/api/v1/disputes/:id/resolve`              | ✓    |
+| POST   | `/api/v1/disputes/:id/reject`               | ✓    |
 
 ## Testing
 

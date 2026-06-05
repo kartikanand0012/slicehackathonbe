@@ -19,14 +19,35 @@ export const ConvertReceiptBody = z
   .object({
     title: z.string().min(1).max(120).trim(),
     paidById: Cuid,
-    splitMode: z.enum(["EQUAL", "ITEM"]).default("EQUAL"),
-    userIds: z.array(Cuid).min(1).max(50).optional(), // required for EQUAL
+    splitMode: z.enum(["EQUAL", "CONSTRAINT"]).default("EQUAL"),
+    // EQUAL: list of userIds
+    userIds: z.array(Cuid).min(1).max(50).optional(),
+    // CONSTRAINT: participants with optional allow/deny tag lists. Receipt
+    // items + tags + tax/tip come straight from the stored receipt — caller
+    // doesn't re-supply them. Keeps the request body tiny.
+    participants: z
+      .array(
+        z.object({
+          userId: Cuid,
+          allow: z.array(z.string().max(40)).optional(),
+          deny: z.array(z.string().max(40)).optional(),
+        }),
+      )
+      .min(1)
+      .max(50)
+      .optional(),
   })
   .strict()
-  .refine((b) => b.splitMode !== "EQUAL" || (b.userIds && b.userIds.length > 0), {
-    message: "userIds is required for EQUAL split",
-    path: ["userIds"],
-  });
+  .refine(
+    (b) =>
+      (b.splitMode === "EQUAL" && b.userIds && b.userIds.length > 0) ||
+      (b.splitMode === "CONSTRAINT" && b.participants && b.participants.length > 0),
+    {
+      message:
+        "EQUAL needs `userIds`; CONSTRAINT needs `participants` with optional allow/deny tag lists",
+      path: ["splitMode"],
+    },
+  );
 export type ConvertReceiptBody = z.infer<typeof ConvertReceiptBody>;
 
 export const ReceiptParams = z.object({ receiptId: Cuid });

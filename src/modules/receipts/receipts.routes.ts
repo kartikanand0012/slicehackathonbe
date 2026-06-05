@@ -3,6 +3,7 @@ import multer from "multer";
 import { env } from "@/config/env";
 import { BadRequestError } from "@/lib/errors";
 import { requireAuth } from "@/middleware/auth";
+import { rateLimit } from "@/middleware/rate-limit";
 import {
   asyncHandler,
   validateBody,
@@ -44,8 +45,14 @@ router.get(
   }),
 );
 
+// OCR extraction also burns model tokens. Cap a single client at 10
+// extractions per 5 min — well above the realistic demo ceiling but tight
+// enough to stop a runaway upload loop.
+const extractLimiter = rateLimit("receipt-extract", 10, 5 * 60_000);
+
 router.post(
   "/extract",
+  extractLimiter,
   upload.single("image"),
   asyncHandler(async (req, res) => {
     if (!req.file) throw new BadRequestError("`image` form field is required");

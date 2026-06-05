@@ -165,7 +165,7 @@
           }
         },
         {
-          "name": "Add member",
+          "name": "Add member (Bob)",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
@@ -174,8 +174,17 @@
           }
         },
         {
-          "name": "Remove member",
-          "request": { "method": "DELETE", "url": { "raw": "{{base_url}}{{api_prefix}}/groups/{{group_id}}/members/REPLACE_WITH_USER_CUID", "host": ["{{base_url}}{{api_prefix}}"], "path": ["groups", "{{group_id}}", "members", "REPLACE_WITH_USER_CUID"] } }
+          "name": "Add member (Charlie — will be removed below)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"userId\": \"REPLACE_WITH_OTHER_USER_CUID\",\n  \"role\": \"MEMBER\"\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/groups/{{group_id}}/members", "host": ["{{base_url}}{{api_prefix}}"], "path": ["groups", "{{group_id}}", "members"] }
+          }
+        },
+        {
+          "name": "Remove member (Charlie — leaves Bob in the group)",
+          "request": { "method": "DELETE", "url": { "raw": "{{base_url}}{{api_prefix}}/groups/{{group_id}}/members/REPLACE_WITH_OTHER_USER_CUID", "host": ["{{base_url}}{{api_prefix}}"], "path": ["groups", "{{group_id}}", "members", "REPLACE_WITH_OTHER_USER_CUID"] } }
         }
       ]
     },
@@ -446,6 +455,78 @@
         {
           "name": "List recent command runs",
           "request": { "method": "GET", "url": { "raw": "{{base_url}}{{api_prefix}}/commands?limit=20", "host": ["{{base_url}}{{api_prefix}}"], "path": ["commands"], "query": [{ "key": "limit", "value": "20" }] } }
+        }
+      ]
+    },
+    {
+      "name": "Disputes (Fairness Engine)",
+      "description": "Proposal §04 — anyone with a share in an expense can flag it. Service first tries to auto-resolve from receipt data + payload; otherwise escalates to the splitter. Resolver posts new share amounts; engine validates sum matches expense total.\n\nState machine: OPEN → AUTO_RESOLVED | RESOLVED | REJECTED.\n\nRate limit: 5 dispute filings per 5 min per IP.\n\nThis folder creates its own fresh expense first (`dispute_expense_id`) so its tests don't depend on the Expenses folder's soft-delete step.",
+      "item": [
+        {
+          "name": "Setup: create fresh expense for dispute tests",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "if (pm.response.code === 201) {",
+            "  pm.environment.set('dispute_expense_id', pm.response.json().expense.id);",
+            "}"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"Dispute-target dinner\",\n  \"amountPaise\": 250000,\n  \"paidById\": \"{{user_id}}\",\n  \"split\": {\n    \"mode\": \"EXACT\",\n    \"shares\": [\n      { \"userId\": \"{{user_id}}\", \"amountPaise\": 150000 },\n      { \"userId\": \"{{user_b_id}}\", \"amountPaise\": 100000 }\n    ]\n  }\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/groups/{{group_id}}/expenses", "host": ["{{base_url}}{{api_prefix}}"], "path": ["groups", "{{group_id}}", "expenses"] }
+          }
+        },
+        {
+          "name": "List disputes on an expense",
+          "request": { "method": "GET", "url": { "raw": "{{base_url}}{{api_prefix}}/expenses/{{dispute_expense_id}}/disputes", "host": ["{{base_url}}{{api_prefix}}"], "path": ["expenses", "{{dispute_expense_id}}", "disputes"] } }
+        },
+        {
+          "name": "File: small delta → auto-resolved",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "if (pm.response.code === 201) {",
+            "  const body = pm.response.json();",
+            "  pm.environment.set('dispute_id', body.dispute.id);",
+            "  pm.environment.set('dispute_auto_resolved', body.autoResolved ? 'yes' : 'no');",
+            "}"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"I think I was charged a few rupees too much for the shared starters\",\n  \"payload\": { \"paiseDelta\": 200 }\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/expenses/{{dispute_expense_id}}/disputes", "host": ["{{base_url}}{{api_prefix}}"], "path": ["expenses", "{{dispute_expense_id}}", "disputes"] }
+          }
+        },
+        {
+          "name": "File: large delta → escalates (OPEN)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "if (pm.response.code === 201) {",
+            "  pm.environment.set('dispute_open_id', pm.response.json().dispute.id);",
+            "}"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"I left before dessert was served — please remove ₹500 from my share\",\n  \"payload\": { \"paiseDelta\": 50000 }\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/expenses/{{dispute_expense_id}}/disputes", "host": ["{{base_url}}{{api_prefix}}"], "path": ["expenses", "{{dispute_expense_id}}", "disputes"] }
+          }
+        },
+        {
+          "name": "Resolve: splitter posts new shares",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"newShares\": [\n    { \"userId\": \"{{user_id}}\", \"amountPaise\": 200000 },\n    { \"userId\": \"{{user_b_id}}\", \"amountPaise\": 50000 }\n  ],\n  \"resolution\": \"Adjusted: removed dessert from your share, redistributed to the splitter.\"\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/disputes/{{dispute_open_id}}/resolve", "host": ["{{base_url}}{{api_prefix}}"], "path": ["disputes", "{{dispute_open_id}}", "resolve"] }
+          }
+        },
+        {
+          "name": "Reject (alternative path — expected 400 since dispute is already RESOLVED)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"resolution\": \"After checking the bill, the original split was correct.\"\n}" },
+            "url": { "raw": "{{base_url}}{{api_prefix}}/disputes/{{dispute_open_id}}/reject", "host": ["{{base_url}}{{api_prefix}}"], "path": ["disputes", "{{dispute_open_id}}", "reject"] }
+          }
         }
       ]
     },

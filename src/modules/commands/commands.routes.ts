@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "@/middleware/auth";
+import { rateLimit } from "@/middleware/rate-limit";
 import {
   asyncHandler,
   validateBody,
@@ -16,6 +17,10 @@ import * as service from "./commands.service";
 const router: Router = Router();
 router.use(requireAuth);
 
+// Parsing burns model tokens — limit per IP. 20/min is generous for chat,
+// tight enough to absorb a misconfigured FE retry loop without bankrupting us.
+const parseLimiter = rateLimit("command-parse", 20, 60_000);
+
 router.get(
   "/",
   validateQuery(ListCommandsQuery),
@@ -27,6 +32,7 @@ router.get(
 
 router.post(
   "/",
+  parseLimiter,
   validateBody(ParseCommandBody),
   asyncHandler(async (req, res) => {
     const result = await service.parseCommand(req.user!.id, req.body);

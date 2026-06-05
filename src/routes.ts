@@ -3,6 +3,10 @@ import { authRouter } from "@/modules/auth/auth.routes";
 import { balancesRouter } from "@/modules/balances/balances.routes";
 import { commandsRouter } from "@/modules/commands/commands.routes";
 import { contactsRouter } from "@/modules/contacts/contacts.routes";
+import {
+  disputesRouter,
+  expenseDisputesRouter,
+} from "@/modules/disputes/disputes.routes";
 import { expensesRouter } from "@/modules/expenses/expenses.routes";
 import { groupsRouter } from "@/modules/groups/groups.routes";
 import {
@@ -24,6 +28,9 @@ apiRouter.use("/groups", groupsRouter);
 apiRouter.use("/groups/:groupId/expenses", expensesRouter);
 apiRouter.use("/groups/:groupId/settlements", settlementsRouter);
 apiRouter.use("/groups/:groupId/balances", balancesRouter);
+
+apiRouter.use("/expenses/:expenseId/disputes", expenseDisputesRouter);
+apiRouter.use("/disputes", disputesRouter);
 
 apiRouter.use("/contacts", contactsRouter);
 apiRouter.use("/receipts", receiptsRouter);

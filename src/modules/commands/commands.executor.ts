@@ -18,6 +18,7 @@ import * as groupsService from "@/modules/groups/groups.service";
 import * as expensesService from "@/modules/expenses/expenses.service";
 import * as settlementsService from "@/modules/settlements/settlements.service";
 import * as balancesService from "@/modules/balances/balances.service";
+import { renderExplanationNarrated } from "./explain-renderer";
 
 export type ExecutionResult =
   | { type: "GROUP_CREATED"; groupId: string }
@@ -30,7 +31,13 @@ export type ExecutionResult =
       balances: unknown;
       transfers: unknown;
     }
-  | { type: "EXPENSE_EXPLAINED"; expenseId: string; explanation: string };
+  | {
+      type: "EXPENSE_EXPLAINED";
+      expenseId: string;
+      explanation: string;
+      narrationSource: "template" | "model";
+      narrationModel?: string;
+    };
 
 export async function executeIntent(
   userId: string,
@@ -178,11 +185,30 @@ export async function executeIntent(
         },
       });
       if (!exp) throw new BadRequestError("Expense not found");
-      const explanation = renderExpenseExplanation(exp, intent.audienceUserId);
+
+      const audience = intent.audienceUserId
+        ? exp.shares.find((s) => s.user.id === intent.audienceUserId)
+        : null;
+
+      const { text, source, model } = await renderExplanationNarrated({
+        title: exp.title,
+        splitMode: exp.splitMode,
+        amountPaise: exp.amountPaise,
+        paidByName: exp.paidBy.name,
+        audienceName: audience?.user.name,
+        audienceShare: audience?.amountPaise,
+        shares: exp.shares.map((s) => ({
+          name: s.user.name,
+          amountPaise: s.amountPaise,
+        })),
+      });
+
       return {
         type: "EXPENSE_EXPLAINED",
         expenseId: exp.id,
-        explanation,
+        explanation: text,
+        narrationSource: source,
+        narrationModel: model,
       };
     }
 
@@ -191,33 +217,3 @@ export async function executeIntent(
   }
 }
 
-function renderExpenseExplanation(
-  exp: {
-    title: string;
-    amountPaise: number;
-    splitMode: string;
-    paidBy: { name: string };
-    shares: { amountPaise: number; user: { id: string; name: string } }[];
-  },
-  audienceUserId: string | undefined,
-): string {
-  const formatINR = (paise: number) =>
-    new Intl.NumberFormat("en-IN", {
-      style: "currency",
-      currency: "INR",
-      minimumFractionDigits: 2,
-    }).format(paise / 100);
-  const audience = audienceUserId
-    ? exp.shares.find((s) => s.user.id === audienceUserId)
-    : null;
-  const lines = [
-    `${exp.title} (${exp.splitMode.toLowerCase()} split) — total ${formatINR(exp.amountPaise)} paid by ${exp.paidBy.name}.`,
-    ...exp.shares.map(
-      (s) => `  • ${s.user.name}: ${formatINR(s.amountPaise)}`,
-    ),
-  ];
-  if (audience) {
-    lines.push(`Your share: ${formatINR(audience.amountPaise)}.`);
-  }
-  return lines.join("\n");
-}

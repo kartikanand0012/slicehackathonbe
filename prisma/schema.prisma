@@ -28,19 +28,21 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  memberships     GroupMember[]
-  expensesPaid    Expense[]      @relation("ExpensePaidBy")
-  expensesCreated Expense[]      @relation("ExpenseCreatedBy")
-  expenseShares   ExpenseShare[]
-  settlementsOut  Settlement[]   @relation("SettlementFrom")
-  settlementsIn   Settlement[]   @relation("SettlementTo")
-  contactsOwned   Contact[]      @relation("ContactOwner")
-  contactLinked   Contact[]      @relation("ContactLinkedUser")
-  refreshTokens   RefreshToken[]
-  auditEvents     AuditEvent[]
-  receipts        Receipt[]
-  guestSplits     GuestSplit[]   @relation("GuestSplitCreatedBy")
-  commandRuns     CommandRun[]
+  memberships      GroupMember[]
+  expensesPaid     Expense[]      @relation("ExpensePaidBy")
+  expensesCreated  Expense[]      @relation("ExpenseCreatedBy")
+  expenseShares    ExpenseShare[]
+  settlementsOut   Settlement[]   @relation("SettlementFrom")
+  settlementsIn    Settlement[]   @relation("SettlementTo")
+  contactsOwned    Contact[]      @relation("ContactOwner")
+  contactLinked    Contact[]      @relation("ContactLinkedUser")
+  refreshTokens    RefreshToken[]
+  auditEvents      AuditEvent[]
+  receipts         Receipt[]
+  guestSplits      GuestSplit[]   @relation("GuestSplitCreatedBy")
+  commandRuns      CommandRun[]
+  disputesRaised   Dispute[]      @relation("DisputeRaisedBy")
+  disputesResolved Dispute[]      @relation("DisputeResolvedBy")
 
   @@index([phone])
 }
@@ -172,6 +174,7 @@ model Expense {
   paidBy    User           @relation("ExpensePaidBy", fields: [paidById], references: [id])
   createdBy User           @relation("ExpenseCreatedBy", fields: [createdById], references: [id])
   shares    ExpenseShare[]
+  disputes  Dispute[]
 
   @@index([groupId, occurredAt(sort: Desc)])
   @@index([paidById])
@@ -244,6 +247,11 @@ enum AuditAction {
   COMMAND_EXECUTED
   COMMAND_REJECTED
   COMMAND_FAILED
+  DISPUTE_FLAGGED
+  DISPUTE_AUTO_RESOLVED
+  DISPUTE_RESOLVED
+  DISPUTE_REJECTED
+  EXPENSE_REVISED
 }
 
 model AuditEvent {
@@ -446,5 +454,43 @@ model CommandRun {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt(sort: Desc)])
+  @@index([status])
+}
+
+// ─── DISPUTES (Fairness Engine — proposal §04) ────────────
+// Anyone with a share in an expense can flag a specific item or amount.
+// The service first tries to auto-resolve from receipt data; otherwise it
+// escalates to the splitter who can adjust shares, after which everyone
+// affected is re-notified. State machine: OPEN → AUTO_RESOLVED|RESOLVED|REJECTED.
+
+enum DisputeStatus {
+  OPEN
+  AUTO_RESOLVED
+  RESOLVED
+  REJECTED
+}
+
+model Dispute {
+  id             String        @id @default(cuid())
+  expenseId      String
+  raisedById     String
+  status         DisputeStatus @default(OPEN)
+  reason         String        @db.Text
+  // For ITEM/CONSTRAINT splits: { itemNames: string[], paiseDelta?: int }.
+  // For simpler disputes: { paiseDelta: int }. Always JSON for flexibility.
+  payload        Json?
+  resolverId     String?
+  resolution     String?       @db.Text
+  newSharesPaise Json? // recorded snapshot when the splitter re-allocates
+  resolvedAt     DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  expense  Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  raisedBy User    @relation("DisputeRaisedBy", fields: [raisedById], references: [id], onDelete: Cascade)
+  resolver User?   @relation("DisputeResolvedBy", fields: [resolverId], references: [id], onDelete: SetNull)
+
+  @@index([expenseId])
+  @@index([raisedById])
   @@index([status])
 }

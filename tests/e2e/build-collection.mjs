@@ -173,26 +173,38 @@ collection.item.unshift(setupFolder);
 // at the env vars Setup populates.
 
 const REPLACEMENTS = [
+  // Longer keys first so a shorter key doesn't accidentally match a longer
+  // one. (`REPLACE_WITH_OTHER_USER_CUID` contains no substring that the
+  // others match, but keeping the rule documented.)
+  ["REPLACE_WITH_OTHER_USER_CUID", "{{user_c_id}}"],
   ["REPLACE_WITH_USER_CUID", "{{user_b_id}}"],
   ["REPLACE_WITH_DEBTOR_CUID", "{{user_b_id}}"],
-  // Item CUIDs are receipt-item-specific — leave them, those requests are
-  // exercised by the Receipts (async OCR) flow which produces a real receipt
-  // first. We mark them clearly so Newman shows them as expected-skip rather
-  // than mystery failures.
+  // Item CUIDs are receipt-item-specific — left untouched; those requests
+  // are exercised after a real receipt is produced earlier in the run.
 ];
 
+function patchString(s) {
+  let out = s;
+  for (const [a, b] of REPLACEMENTS) out = out.split(a).join(b);
+  return out;
+}
+
 function walkAndPatch(node) {
-  if (Array.isArray(node)) return node.forEach(walkAndPatch);
+  if (Array.isArray(node)) {
+    // Arrays may hold strings directly (e.g. Postman URL `path` arrays).
+    // Patch those in place; recurse into anything else.
+    for (let i = 0; i < node.length; i++) {
+      const el = node[i];
+      if (typeof el === "string") node[i] = patchString(el);
+      else walkAndPatch(el);
+    }
+    return;
+  }
   if (node && typeof node === "object") {
     for (const k of Object.keys(node)) {
       const v = node[k];
-      if (typeof v === "string") {
-        let patched = v;
-        for (const [a, b] of REPLACEMENTS) patched = patched.split(a).join(b);
-        node[k] = patched;
-      } else {
-        walkAndPatch(v);
-      }
+      if (typeof v === "string") node[k] = patchString(v);
+      else walkAndPatch(v);
     }
   }
 }
@@ -289,6 +301,189 @@ appendTest(uploadRequest, [
 appendTest(findRequest("Commands (NL: voice + chat)", "Parse: balance query"), [
   "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
   "pm.test('plan has explanation', () => pm.expect(pm.response.json().plan.explanation).to.be.a('string'));",
+]);
+
+// ── Auth — token capture + revocation
+appendTest(findRequest("Auth", "Login"), [
+  "pm.test('200 OK', () => pm.expect(pm.response.code).to.eql(200));",
+  "pm.test('access token is a JWT-shaped string', () => {",
+  "  const t = pm.response.json().accessToken;",
+  "  pm.expect(t.split('.')).to.have.lengthOf(3);",
+  "});",
+  "pm.test('user object includes id, email, name', () => {",
+  "  const u = pm.response.json().user;",
+  "  pm.expect(u).to.include.keys('id', 'email', 'name');",
+  "});",
+]);
+
+appendTest(findRequest("Auth", "Refresh"), [
+  "pm.test('200 OK', () => pm.expect(pm.response.code).to.eql(200));",
+  "pm.test('new access token is issued', () => pm.expect(pm.response.json().accessToken).to.be.a('string'));",
+]);
+
+// ── Me
+appendTest(findRequest("Me", "Get my profile"), [
+  "pm.test('200 OK', () => pm.expect(pm.response.code).to.eql(200));",
+  "pm.test('does not leak password hash', () => {",
+  "  pm.expect(JSON.stringify(pm.response.json())).to.not.contain('passwordHash');",
+  "});",
+]);
+
+appendTest(findRequest("Me", "Update profile"), [
+  "pm.test('200 OK', () => pm.expect(pm.response.code).to.eql(200));",
+  "pm.test('updated name is echoed back', () => {",
+  "  pm.expect(pm.response.json().user.name).to.eql('Alice K.');",
+  "});",
+]);
+
+// ── Groups — list pagination shape, lookups
+appendTest(findRequest("Groups", "List my groups"), [
+  "pm.test('200 OK', () => pm.expect(pm.response.code).to.eql(200));",
+  "pm.test('has items array', () => pm.expect(pm.response.json().items).to.be.an('array'));",
+  "pm.test('cursor field present', () => pm.expect(pm.response.json()).to.have.property('nextCursor'));",
+]);
+
+appendTest(findRequest("Groups", "Get group by id"), [
+  "pm.test('200 OK', () => pm.expect(pm.response.code).to.eql(200));",
+  "pm.test('group has members array', () => pm.expect(pm.response.json().group.members).to.be.an('array'));",
+]);
+
+// ── Expenses — PERCENTAGE + SHARES checks
+appendTest(findRequest("Expenses", "Create expense — PERCENTAGE"), [
+  "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
+  "pm.test('shares sum to total', () => {",
+  "  const exp = pm.response.json().expense;",
+  "  const sum = exp.shares.reduce((s, sh) => s + sh.amountPaise, 0);",
+  "  pm.expect(sum).to.eql(exp.amountPaise);",
+  "});",
+  "pm.test('every share has basisPoints set', () => {",
+  "  pm.expect(pm.response.json().expense.shares.every(s => typeof s.basisPoints === 'number')).to.be.true;",
+  "});",
+]);
+
+appendTest(findRequest("Expenses", "Create expense — SHARES"), [
+  "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
+  "pm.test('shares sum to total', () => {",
+  "  const exp = pm.response.json().expense;",
+  "  const sum = exp.shares.reduce((s, sh) => s + sh.amountPaise, 0);",
+  "  pm.expect(sum).to.eql(exp.amountPaise);",
+  "});",
+]);
+
+appendTest(findRequest("Expenses", "List expenses"), [
+  "pm.test('200 OK', () => pm.expect(pm.response.code).to.eql(200));",
+  "pm.test('items is an array', () => pm.expect(pm.response.json().items).to.be.an('array'));",
+]);
+
+// ── Settlements
+appendTest(findRequest("Settlements", "Create settlement"), [
+  "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
+  "pm.test('settlement carries both party names', () => {",
+  "  const s = pm.response.json().settlement;",
+  "  pm.expect(s.from).to.have.property('name');",
+  "  pm.expect(s.to).to.have.property('name');",
+  "});",
+]);
+
+// ── Balances — UPI deep link
+appendTest(findRequest("Balances", "Get group balances"), [
+  "pm.test('transfers is an array', () => pm.expect(pm.response.json().transfers).to.be.an('array'));",
+  "pm.test('balances include name + upiHandle', () => {",
+  "  const b = pm.response.json().balances[0];",
+  "  if (b) {",
+  "    pm.expect(b).to.include.keys('name', 'upiHandle', 'netPaise');",
+  "  }",
+  "});",
+]);
+
+// ── Contacts — phone search
+appendTest(findRequest("Contacts", "Create contact"), [
+  "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
+  "pm.test('contact has displayName', () => pm.expect(pm.response.json().contact.displayName).to.be.a('string'));",
+]);
+
+appendTest(findRequest("Contacts", "List contacts"), [
+  "pm.test('200 OK', () => pm.expect(pm.response.code).to.eql(200));",
+  "pm.test('items is an array', () => pm.expect(pm.response.json().items).to.be.an('array'));",
+]);
+
+// ── Receipts — poll until COMPLETED (Newman runs sequentially; mock provider
+// finishes inside the --delay-request 250ms window).
+appendTest(findRequest("Receipts (async OCR)", "Poll receipt status"), [
+  "pm.test('200 OK', () => pm.expect(pm.response.code).to.eql(200));",
+  "const r = pm.response.json().receipt;",
+  "pm.test('mock provider completes within poll window', () => pm.expect(r.status).to.be.oneOf(['COMPLETED', 'PROCESSING']));",
+]);
+
+appendTest(findRequest("Receipts (async OCR)", "Convert receipt to expense (EQUAL)"), [
+  "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
+  "pm.test('expense title carried through', () => pm.expect(pm.response.json().expense.title).to.eql('Cafe Bistro'));",
+]);
+
+// ── Commands — extensive assertions per pattern
+appendTest(findRequest("Commands (NL: voice + chat)", "Parse: dietary CONSTRAINT split (the showstopper)"), [
+  "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
+  "pm.test('commandRun id captured', () => pm.expect(pm.response.json().commandRun.id).to.be.a('string'));",
+  "pm.test('parsed intent is present', () => pm.expect(pm.response.json().intent).to.have.property('type'));",
+  "pm.test('status starts as PARSED', () => pm.expect(pm.response.json().commandRun.status).to.eql('PARSED'));",
+]);
+
+appendTest(findRequest("Commands (NL: voice + chat)", "Parse: create + populate group"), [
+  "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
+]);
+
+// ── Guest splits
+appendTest(findRequest("Guest Splits (Owner)", "Create guest split"), [
+  "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
+  "pm.test('shareToken returned', () => pm.expect(pm.response.json().guestSplit.shareToken).to.be.a('string'));",
+  "pm.test('status starts as CLAIMING', () => pm.expect(pm.response.json().guestSplit.status).to.eql('CLAIMING'));",
+  "pm.test('peopleNames materialised into people[]', () => {",
+  "  pm.expect(pm.response.json().guestSplit.people).to.have.length(3);",
+  "});",
+]);
+
+appendTest(findRequest("Guest Splits (Public)", "View by share token"), [
+  "pm.test('200 OK', () => pm.expect(pm.response.code).to.eql(200));",
+  "pm.test('claimToken is NOT leaked in public view', () => {",
+  "  pm.response.json().guestSplit.people.forEach(p => {",
+  "    pm.expect(p).to.not.have.property('claimToken');",
+  "  });",
+  "});",
+]);
+
+appendTest(findRequest("Guest Splits (Public)", "Add person"), [
+  "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
+  "pm.test('claim token returned on creation', () => pm.expect(pm.response.json().person.claimToken).to.be.a('string'));",
+]);
+
+// ── Disputes — auto-resolve vs escalate
+appendTest(findRequest("Disputes (Fairness Engine)", "Setup: create fresh expense for dispute tests"), [
+  "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
+  "pm.test('expense total matches', () => pm.expect(pm.response.json().expense.amountPaise).to.eql(250000));",
+]);
+
+appendTest(findRequest("Disputes (Fairness Engine)", "File: small delta → auto-resolved"), [
+  "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
+  "pm.test('autoResolved flag is true', () => pm.expect(pm.response.json().autoResolved).to.be.true);",
+  "pm.test('status is AUTO_RESOLVED', () => pm.expect(pm.response.json().dispute.status).to.eql('AUTO_RESOLVED'));",
+  "pm.test('decisionReason is human-readable', () => pm.expect(pm.response.json().decisionReason).to.be.a('string'));",
+]);
+
+appendTest(findRequest("Disputes (Fairness Engine)", "File: large delta → escalates (OPEN)"), [
+  "pm.test('201 created', () => pm.expect(pm.response.code).to.eql(201));",
+  "pm.test('autoResolved flag is false', () => pm.expect(pm.response.json().autoResolved).to.be.false);",
+  "pm.test('status is OPEN', () => pm.expect(pm.response.json().dispute.status).to.eql('OPEN'));",
+]);
+
+appendTest(findRequest("Disputes (Fairness Engine)", "Resolve: splitter posts new shares"), [
+  "pm.test('200 OK', () => pm.expect(pm.response.code).to.eql(200));",
+  "pm.test('status is RESOLVED', () => pm.expect(pm.response.json().dispute.status).to.eql('RESOLVED'));",
+  "pm.test('resolution recorded', () => pm.expect(pm.response.json().dispute.resolution).to.be.a('string'));",
+]);
+
+appendTest(findRequest("Disputes (Fairness Engine)", "List disputes on an expense"), [
+  "pm.test('200 OK', () => pm.expect(pm.response.code).to.eql(200));",
+  "pm.test('items is an array', () => pm.expect(pm.response.json().items).to.be.an('array'));",
 ]);
 
 fs.mkdirSync(OUT_DIR, { recursive: true });

@@ -289,6 +289,7 @@ slicesplit-backend/
 | PR 2 — domain features + AI + guest splits | ✅ shipped | expense/settlement/balance routes, contacts, UPI deep-links, AI provider registry + receipt pipeline, guest-split state machine |
 | PR 3 — Claude/Bedrock + NL command layer + tools + OCR hardening | ✅ shipped | Anthropic + Bedrock providers behind a common interface, AI-tools layer ("skills"), implicit-constraint NL command pipeline, CONSTRAINT split mode, async receipt OCR with SHA-256 dedup + retry/backoff + sanitization, 58 tests |
 | PR 3.5 — e2e test harness (Newman) | ✅ shipped | Self-bootstrapping Postman suite over Docker compose; 57 reqs / 25 assertions / 0 failures; **caught 3 production bugs** before they could ship |
+| PR 4 — Fairness engine + AI-narrated explain + production polish | ✅ shipped | Dispute loop (auto-resolve + resolve + reject), Claude-narrated EXPLAIN with template fallback, CONSTRAINT-on-receipt-convert, per-route rate limits; 68 unit tests, 64 req / 85 assertions / 0 failures e2e |
 
 ---
 
@@ -602,3 +603,145 @@ All three are in script / config / build land — exactly the kind of bug pure-f
 - Per-route rate-limit triggering (bypassed for the suite)
 
 All PR 4 / PR 5 candidates.
+
+---
+
+## 14. PR 4 — Fairness engine + AI-narrated explain + production polish
+
+PR 4 lands the highest-value items from the "addressable-without-slice-access" set: the **Dispute loop** (proposal §04 Beat 3 of the demo plan), **Claude-narrated EXPLAIN_EXPENSE** (proposal §04 transparency theme), **CONSTRAINT mode on receipt-to-expense conversion** (closes the last engine hole), and **per-route rate limits** (production defense).
+
+### 14A. Disputes module — proposal §04
+
+End-to-end fairness loop. State machine: `OPEN → AUTO_RESOLVED | RESOLVED | REJECTED`.
+
+| Route | Purpose |
+| --- | --- |
+| `POST /expenses/:expenseId/disputes` | File a dispute. Body carries `reason` + optional structured `payload` (`itemNames[]`, `paiseDelta`). Service runs the auto-resolver first; closes as `AUTO_RESOLVED` if the answer is defensible from the data, otherwise leaves it `OPEN`. **Rate-limited: 5 filings per 5 min per IP.** |
+| `GET /expenses/:expenseId/disputes` | List dispute history on an expense (any group member). |
+| `POST /disputes/:disputeId/resolve` | Splitter (or group admin) posts a new full share allocation. Engine validates `sum(newShares) === expense.amountPaise`. Atomically replaces `ExpenseShare` rows, marks dispute `RESOLVED`, writes `EXPENSE_REVISED` audit. |
+| `POST /disputes/:disputeId/reject` | Close as `REJECTED` with a `resolution` message. |
+
+**Auto-resolver heuristics (`disputes.service.decideAutoResolve`)** — kept narrow on purpose:
+
+- If `payload.paiseDelta` is provided and ≤ 10 % of the raiser's current share → **auto-resolve** ("delta within 10 % of own share — auto-credited"). The splitter still gets a notification, but the dispute is closed.
+- If `payload.itemNames[]` is provided but the expense isn't `ITEM` or `CONSTRAINT` mode → escalate (we can't unilaterally re-allocate without the item structure).
+- Anything else (no structured signal, delta too large, raiser has no share) → escalate.
+
+Audit events at every transition: `DISPUTE_FLAGGED`, `DISPUTE_AUTO_RESOLVED`, `DISPUTE_RESOLVED`, `DISPUTE_REJECTED`, plus an `EXPENSE_REVISED` row on resolve so the audit trail tells the full story.
+
+### 14B. Claude-narrated EXPLAIN_EXPENSE
+
+The engine still computes the breakdown (proposal §04 design rule). The renderer (`src/modules/commands/explain-renderer.ts`) has two paths:
+
+- `renderExplanationTemplate()` — deterministic, fast, no network. Always works.
+- `renderExplanationNarrated()` — sends the **already-computed** breakdown to the configured `IntentParser` provider and asks it to paraphrase. Falls back to the template if no provider is configured, the model returns empty text, or the call throws. The numbers are never recomputed — the AI only does word choice.
+
+The system prompt (`src/ai/prompts/explain-expense.ts`) embeds the rule explicitly: *"NEVER invent, change, or recompute numbers. Use only the paise values in the provided breakdown."*
+
+`EXECUTE`d `EXPLAIN_EXPENSE` intents now return `narrationSource: "template" | "model"` and (when narrated) `narrationModel`, so callers can tell whether the explanation came from the engine fallback or the LLM.
+
+### 14C. CONSTRAINT mode on receipt → expense conversion
+
+Closes the only first-class hole in the engine. `POST /receipts/:id/convert` now accepts:
+
+```jsonc
+{
+  "title": "Cafe Bistro",
+  "paidById": "<userId>",
+  "splitMode": "CONSTRAINT",
+  "participants": [
+    { "userId": "kartik" },
+    { "userId": "sukant" },
+    { "userId": "mohit", "allow": ["veg", "beverage"] }
+  ]
+}
+```
+
+The service pulls the receipt's already-tagged items + total, computes `commonItemsPaise = totalPaise - sum(items)` (tax + tip + service), and hands the whole thing to the existing CONSTRAINT split engine. No item tagging happens at convert time — the AI already did that at extraction.
+
+Validates `sum(items) ≤ totalPaise`; throws cleanly if the receipt is inconsistent.
+
+### 14D. Per-route rate limits
+
+Adding the dispute filing limiter raised the question: what else should be limited? Two more endpoints landed protection in PR 4:
+
+| Route | Limit | Why |
+| --- | --- | --- |
+| `POST /commands` | 20 / min per IP | Each parse burns AI tokens (intent loop with tool-use rounds). A misconfigured FE retry loop here gets expensive fast. |
+| `POST /receipts/extract` | 10 / 5 min per IP | Same reasoning — each call invokes the receipt extractor. |
+| `POST /expenses/:id/disputes` | 5 / 5 min per IP | Matches the proposal's "flags are rate-limited" rule (§04). |
+
+`/auth/*` already had a per-IP limiter from PR 1.
+
+### 14E. Schema additions
+
+- `Dispute` model with full audit trail (`raisedById`, `resolverId`, `payload`, `resolution`, `newSharesPaise` snapshot).
+- `DisputeStatus` enum.
+- `Expense.disputes Dispute[]` reverse relation.
+- New `AuditAction` entries: `DISPUTE_FLAGGED`, `DISPUTE_AUTO_RESOLVED`, `DISPUTE_RESOLVED`, `DISPUTE_REJECTED`, `EXPENSE_REVISED`.
+
+### 14F. Tests added
+
+| File | Tests | Coverage |
+| --- | --- | --- |
+| `src/modules/disputes/disputes.service.test.ts` | 6 | Every branch of `decideAutoResolve` — no payload, small delta, large delta, item-mode mismatch, zero delta, raiser has no share. |
+| `src/modules/commands/explain-renderer.test.ts` | 4 | `formatINR` paise → ₹, template determinism, "Your share" omitted without audience, narrator falls back to template when provider is mock. |
+
+Vitest cumulative: **68 / 68 pass.**
+
+### 14G. Postman / Newman
+
+- New **Disputes (Fairness Engine)** folder: 6 requests covering the full happy path — setup a fresh expense → list → auto-resolve case → escalation case → resolve with new shares → reject (expected 400 since already resolved).
+- New env vars: `dispute_id`, `dispute_open_id`, `dispute_expense_id`, `dispute_auto_resolved`.
+- The canonical Groups folder was refactored so the member-management flow is self-consistent: **Add Bob → Add Charlie → Remove Charlie** (leaving Bob in the group). This eliminates a folder-coupling bug that would cause downstream Receipts → Convert tests to fail because Bob got removed mid-suite.
+- `build-collection.mjs` upgrade: substitution walker now correctly patches string elements inside arrays (Postman URL `path` arrays specifically). A new `REPLACE_WITH_OTHER_USER_CUID` → `{{user_c_id}}` mapping was added for the Charlie role.
+- Layered extra `pm.test(...)` assertions onto Auth, Me, Groups, Expenses (all 4 modes), Settlements, Balances, Contacts, Receipts, Commands, Guest Splits, and Disputes — see `build-collection.mjs` for the full list.
+
+**Newman result (run against `npm run dev` against dev Postgres):**
+
+| Metric | Result |
+| --- | --- |
+| Requests | **64** |
+| Assertions | **85** (was 25 in PR 3.5) |
+| Failures | **0** |
+| Wall time | ~18 s |
+
+### 14H. The Newman-uncovered folder-coupling bug
+
+A real bug worth recording. Pre-PR-4, the canonical Postman collection had a single `"Add member"` followed by `"Remove member"` request, both referencing the literal placeholder `REPLACE_WITH_USER_CUID`. Humans clicking through Postman would fill it in differently each time (or skip), so the side effects didn't compound.
+
+In Newman, `build-collection.mjs` was rewriting `REPLACE_WITH_USER_CUID` → `{{user_b_id}}` *everywhere*. That made `Remove member` actually remove Bob. Several folders later, `Receipts → Convert receipt to expense (EQUAL)` tried to split among `[Alice, Bob]` and failed with `400 — User <bob> is not an active member of this group`. This was the regression I caught from a previous-green endpoint.
+
+Fix was two-part:
+1. **Canonical collection** — added a separate `Add member (Charlie — will be removed below)` and changed the `Remove member` request to target Charlie. Now Bob is added and stays; Charlie comes and goes. The member-management flow tests both add + remove honestly.
+2. **build-collection.mjs walker** — patched the recursion so it also rewrites string elements inside arrays (Postman URL `path` arrays). The existing walker only handled object values, which is why the URL `raw` field was being patched but the `path[]` segment wasn't — the original test would have looked like it worked from URL output until the request actually fired.
+
+Lesson: **folder coupling in an e2e suite is a real failure mode.** Newman runs requests strictly in order; side-effects (membership, soft-deletes) persist across folders unless the suite explicitly resets them. We don't reset — the suite uses a fresh DB per run via docker compose down/up. So the only durable fix is to make destructive operations target throwaway resources, never long-lived ones. The Disputes folder follows the same pattern: it creates its own `dispute_expense_id` instead of leaning on `expense_id` (which the Expenses folder soft-deletes at the end).
+
+### 14I. What's *not* in PR 4 (deferred to PR 5)
+
+- Real slice Pay / UPI Collect rails — needs slice infra access
+- atom Split-to-Save adapter — same
+- PII redaction pipeline (on hold per your directive)
+- Recurring expenses + reminders worker
+- Frontend wire-up inside the slice app
+- Multi-payer expenses, mid-trip member handling
+- Real Claude/Bedrock acceptance pass before demo (replace `fixtures/receipt.png` with a real bill, swap `AI_PROVIDER_PRIORITY`)
+- testcontainers integration tests (Newman covers route → service → Prisma already)
+
+### 14J. Proposal-section coverage map (updated)
+
+| Proposal § | Status | Notes |
+| --- | --- | --- |
+| §02 Core loop | mostly | Settle = UPI deep-link only; Save (atom) blocked on slice access |
+| §02 Headline capabilities | mostly | "Trust & transparency" lifted to ~90% with disputes + narrated explain |
+| §03 Command patterns | partial | Same — the model handles most of these; first-class intents for recurring / time-scoped still pending |
+| §03 Bill & split intelligence | mostly | CONSTRAINT-on-convert closed the last gap |
+| §04 Fairness engine | **~90%** | Dispute loop + auto-resolver + narrated explain all shipped. Re-notify on resolve is a FE concern. |
+| §05 Split-to-Save (atom) | 0% | Blocked on slice access |
+| §06 User flow | mostly | "Share into goal" step still atom-blocked |
+| §07 Architecture | mostly | Bedrock + Claude wired; real UPI rails + VPC deployment blocked |
+| §08 Scalability | partial | Async + retry + dedup + rate-limits ✓; real queue + cache still PR 5 |
+| §09 Edge cases | mostly | Disputes added 4 edge cases (auto-resolve, escalate, re-notify, audit) |
+| §12 Compliance & security | partial | Rate-limits + audit ✓; PII redaction held; VPC = deployment |
+| §13 Phase 1 demo | **demo-ready** | All 3 beats now have backend support: beat 1 (constraint split) ✓, beat 2 (voice — atom step still missing), beat 3 (why ₹620 + flag dessert) ✓ |
